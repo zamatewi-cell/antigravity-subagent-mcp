@@ -10,8 +10,9 @@ import { enrichAgyResult, sanitizeDiagnostics } from "./diagnostics.mjs";
 import { stopProcessTree, isRetryablePreflightFailure } from "./process-control.mjs";
 import { getTaskProgress } from "./progress.mjs";
 import { persistJob, restorePersistedJobs } from "./storage.mjs";
+import { startDashboardServer, openInBrowser } from "./dashboard.mjs";
 
-const SERVER_VERSION = "1.2.2";
+const SERVER_VERSION = "1.3.0";
 const DEFAULT_MODEL = process.env.ANTIGRAVITY_DEFAULT_MODEL || "gemini-3.8-flash-high";
 const DEFAULT_PERMISSION_MODE = process.env.ANTIGRAVITY_PERMISSION_MODE || "auto-approve";
 const DEFAULT_TIMEOUT_SECONDS = 300;
@@ -610,21 +611,67 @@ server.registerTool(
   },
 );
 
+let dashboardInstance = null;
+async function getOrStartDashboard(autoOpen = true) {
+  if (!dashboardInstance) {
+    dashboardInstance = await startDashboardServer({
+      memoryJobs: jobs,
+      autoOpen,
+    });
+  } else if (autoOpen) {
+    openInBrowser(dashboardInstance.url);
+  }
+  return dashboardInstance;
+}
+
+server.registerTool(
+  "open_dashboard",
+  {
+    title: "打开 Antigravity 子代理实时可视化看板",
+    description: "在系统默认浏览器中打开独立的可视化监控看板（Web UI），实时展示全员子代理微观工作流、动作流与物理日志。",
+    inputSchema: z.object({
+      auto_open: z.boolean().default(true).describe("是否自动在默认浏览器中弹出看板窗口"),
+    }),
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+  },
+  async ({ auto_open }) => {
+    try {
+      const d = await getOrStartDashboard(auto_open);
+      return toolResponse({
+        status: "READY",
+        url: d.url,
+        port: d.port,
+        message: `可视化看板已就绪：${d.url}`,
+      });
+    } catch (err) {
+      return toolResponse({ status: "ERROR", error: `启动看板失败: ${err.message}` }, true);
+    }
+  },
+);
+
+// 若环境显式开启了自动启动看板，则随 MCP 进程并行拉起
+if (process.env.ANTIGRAVITY_ENABLE_DASHBOARD === "1") {
+  void getOrStartDashboard(false).catch(() => {});
+}
+
 const transport = new StdioServerTransport();
 await server.connect(transport);
 
 let shutdownPromise;
 function shutdownTasks() {
   if (shutdownPromise) return shutdownPromise;
-  shutdownPromise = Promise.allSettled([...jobs.values()].map(async (job) => {
-    job.cancelRequested = true;
-    if (job.state === "retrying") {
-      job.state = "cancelled";
-      job.completedAt = new Date().toISOString();
-    } else if (["running", "stopping"].includes(job.state)) {
-      await stopJob(job, "cancelled");
-    }
-  }));
+  shutdownPromise = Promise.allSettled([
+    ...[...jobs.values()].map(async (job) => {
+      job.cancelRequested = true;
+      if (job.state === "retrying") {
+        job.state = "cancelled";
+        job.completedAt = new Date().toISOString();
+      } else if (["running", "stopping"].includes(job.state)) {
+        await stopJob(job, "cancelled");
+      }
+    }),
+    dashboardInstance ? dashboardInstance.close().catch(() => {}) : Promise.resolve(),
+  ]);
   return shutdownPromise;
 }
 const onTransportClose = transport.onclose;

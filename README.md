@@ -23,6 +23,16 @@ The bridge never invokes `--disable-slash-commands`. It uses AGY's required
 Per-job AGY logs are stored under `logs/` so a bridge response can be matched to
 the original backend error without scanning unrelated global CLI logs.
 
+Version 1.3.0 changes:
+
+- **Standalone Real-time Visual Monitor Dashboard**: Built an elegant, dark cyberpunk-themed Web dashboard (`src/web/index.html`) using zero external dependencies (pure native Node.js `http` and HTML5/CSS3/ES6).
+  - **God's-eye View Grid**: Renders individual subagent cards for all Teamwork roles (Orchestrator, Workers, Auditor) with live pulse status indicators, step counters, and highlighted active tool tags (`[run_command]`, `[write_to_file]`).
+  - **Micro-Activity Timeline**: Clicking any agent card seamlessly reveals its deep, step-by-step activity stream (`recent_activities`), demystifying internal execution.
+  - **Zero-Polling SSE Push**: Uses Server-Sent Events (`/api/stream`) for sub-second, live real-time state streaming directly to browsers.
+  - **One-Click Controls & Log Streaming**: Supports remote one-click cancellation for running/queued tasks and live diagnostic log tails.
+- **New MCP Tool `open_dashboard`**: Codex can directly trigger `open_dashboard` to automatically pop up the monitor dashboard in the user's default browser (`http://localhost:3721`).
+- **Standalone CLI & Concurrent Integration**: Launchable independently via `npm run dashboard` (`node src/dashboard.mjs [--open]`) or concurrently with MCP when `ANTIGRAVITY_ENABLE_DASHBOARD=1`.
+
 Version 1.2.2 changes:
 
 - **Complete Negation & In-progress Defense**: Hardened `evaluateSubagentStatus` to eliminate completion false-positives. Replaced isolated keyword matching (e.g. standalone `handoff.md` or `VICTORY`) with strict affirmation patterns. Messages containing negative or in-progress modifiers (e.g. "尚未生成，继续修复", "No VICTORY yet; still working") are categorically barred from being marked `completed`.
