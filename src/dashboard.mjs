@@ -85,6 +85,25 @@ export function openInBrowser(targetUrl) {
   exec(cmd, () => {});
 }
 
+function loadDiskJobsRaw() {
+  const jobs = new Map();
+  const jobsDir = path.resolve(__dirname, "..", "data", "jobs");
+  if (!fs.existsSync(jobsDir)) return jobs;
+  try {
+    const files = fs.readdirSync(jobsDir).filter((f) => f.endsWith(".json"));
+    for (const file of files) {
+      try {
+        const text = fs.readFileSync(path.join(jobsDir, file), "utf8");
+        const data = JSON.parse(text);
+        if (data && data.jobId) {
+          jobs.set(data.jobId, data);
+        }
+      } catch {}
+    }
+  } catch {}
+  return jobs;
+}
+
 /**
  * 启动可视化看板 HTTP & SSE 服务
  * @param {object} options
@@ -102,7 +121,7 @@ export function startDashboardServer(options = {}) {
     if (memoryJobs) {
       return Array.from(memoryJobs.values());
     }
-    const diskJobs = restorePersistedJobs();
+    const diskJobs = loadDiskJobsRaw();
     return Array.from(diskJobs.values());
   }
 
@@ -110,7 +129,7 @@ export function startDashboardServer(options = {}) {
     if (memoryJobs && memoryJobs.has(id)) {
       return memoryJobs.get(id);
     }
-    const diskJobs = restorePersistedJobs();
+    const diskJobs = loadDiskJobsRaw();
     return diskJobs.get(id) || null;
   }
 
