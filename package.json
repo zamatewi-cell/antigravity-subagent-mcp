@@ -1,0 +1,40 @@
+{
+  "name": "codex-antigravity-subagent-mcp",
+  "version": "1.0.3",
+  "private": true,
+  "type": "module",
+  "description": "Local MCP bridge that lets Codex delegate work to Google Antigravity CLI.",
+  "license": "MIT",
+  "author": "zamatewi-cell",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zamatewi-cell/antigravity-subagent-mcp.git"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "codex",
+    "antigravity",
+    "subagent",
+    "gemini"
+  ],
+  "scripts": {
+    "start": "node src/server.mjs",
+    "test": "node test/smoke.mjs",
+    "test:teamwork": "node test/teamwork-smoke.mjs",
+    "test:diagnostics": "node test/diagnostics.test.mjs",
+    "test:teamwork-full": "node test/full-teamwork-readonly.mjs",
+    "test:lifecycle": "node test/lifecycle.test.mjs",
+    "test:live": "node test/live-validation.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.0.0",
+    "zod": "4.5.4"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "2.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
