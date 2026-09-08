@@ -23,6 +23,22 @@ The bridge never invokes `--disable-slash-commands`. It uses AGY's required
 Per-job AGY logs are stored under `logs/` so a bridge response can be matched to
 the original backend error without scanning unrelated global CLI logs.
 
+Version 1.3.2 changes:
+
+- **Strict Lifecycle & State Machine Hardening**:
+  - **Readonly Standalone Monitor**: Standalone Dashboard processes (`npm run dashboard` without in-memory `jobs` map) strictly reject cancellation requests for any job lifecycle state (`queued`, `retrying`, `running`), returning HTTP 409 Conflict (`STANDALONE_CANCEL_FORBIDDEN`) to prevent disk state corruption and phantom cancellations.
+  - **Subagent Status Priority Realignment**: Explicitly terminated (`killed`) subagents strictly retain `killed` status and can never be overwritten by parent task `success` or subsequent completion claims. When parent tasks fail or cancel, non-terminated subagents converge synchronously.
+  - **CSRF & DNS Rebinding Protection**: Enforced strict `Host` header whitelisting (`localhost`, `127.0.0.1`) and rejected cross-origin `POST` requests from unauthorized external origins with HTTP 403 Forbidden.
+  - **I/O & Memory Optimization**: Added `mtimeMs` / file `size` caching for `fallbackFromLog` and enforced LRU eviction caps (200 entries) on both `transcriptCache` and `logFallbackCache`.
+  - **Configuration Parity & Verified Lock Testing**: Synchronized custom data directory configurations across all modules and replaced mock test locks with direct unit testing of exported production `withDirectoryLock`.
+
+Version 1.3.1 changes:
+
+- **Robust Security & Concurrency Hardening**:
+  - Eliminated DOM-based XSS vulnerabilities across the Web Dashboard via HTML entity escaping.
+  - Tightened CORS headers, added physical log tail sanitization, and safeguarded earliest termination reasons against state drift.
+  - Introduced atomic persistence and mtime-based transcript caching.
+
 Version 1.3.0 changes:
 
 - **Standalone Real-time Visual Monitor Dashboard**: Built an elegant, dark cyberpunk-themed Web dashboard (`src/web/index.html`) using zero external dependencies (pure native Node.js `http` and HTML5/CSS3/ES6).

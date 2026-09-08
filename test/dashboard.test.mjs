@@ -99,7 +99,7 @@ try {
   assert.equal(statusResp.statusCode, 200);
   const statusData = JSON.parse(statusResp.body);
   assert.equal(statusData.status, "OK");
-  assert.equal(statusData.version, "1.3.1");
+  assert.equal(statusData.version, "1.3.2");
   assert.equal(statusData.total_jobs, 2);
   assert.equal(statusData.active_jobs, 2);
   console.log("  -> PASS: 状态接口统计准确无误");
@@ -136,6 +136,25 @@ try {
   });
   assert.equal(localOriginRes.headers["access-control-allow-origin"], "http://localhost:3000", "本地合法开发域正确获得授权");
   console.log("  -> PASS: CORS 安全访问控制收紧生效");
+
+  // 3.2 验证跨域修改请求拦截（外部 Origin 发起 POST 时必须返回 403 Forbidden）
+  console.log("\n[Test 3.2] 验证恶意外部 Origin 发起 POST 修改操作时被严格阻断（403 Forbidden）...");
+  const evilPostRes = await new Promise((resolve, reject) => {
+    const u = new URL(`${dashboard.url}/api/jobs/${queuedJobId}/cancel`);
+    const req = http.request({
+      hostname: u.hostname,
+      port: u.port,
+      path: u.pathname,
+      method: "POST",
+      headers: { Origin: "https://evil-attacker.example.com" },
+    }, (res) => {
+      resolve({ statusCode: res.statusCode });
+    });
+    req.on("error", reject);
+    req.end();
+  });
+  assert.equal(evilPostRes.statusCode, 403, "携带非本地恶意 Origin 的 POST 取消操作必须被拒绝（HTTP 403）！");
+  console.log("  -> PASS: 跨站恶意 POST 请求被 403 严格阻断，杜绝 CSRF 风险");
 
   // 4. 测试 /api/jobs 接口
   console.log("\n[Test 4] 验证 GET /api/jobs 任务列表及微观结构...");

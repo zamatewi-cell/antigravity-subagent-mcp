@@ -179,62 +179,84 @@ export function isExplicitlyCompleted(text) {
 
 /**
  * 严格裁决子代理当前生命周期状态
- * 准则：宁可判定为 running 或 unknown，绝不能在缺乏不可辩驳证据的情况下虚标 completed
+ * 准则：
+ * 1. 显式 killed 具有不可撼动的最高优先级（即便父任务最终 success，被杀子代理依然是 killed）
+ * 2. 子代理自身显式声明完成（isExplicitlyCompleted）
+ * 3. 父任务非成功终态穿透（cancelled/interrupted/error/timed_out 时子代理同步收敛，不误留在 running）
+ * 4. 父任务成功完成时未被终止的子代理兜底判定为 completed
+ * 5. 缺乏确凿证据时严格保持 running，绝不误标已完成
  * @param {object} childParsed - 子代理 transcript 解析结果
  * @param {Set<string>} killedConversationIds - 父代理中被显式 kill 的会话 ID 集合
  * @param {string} parentState - 父任务整体状态
- * @returns {string} - "running" | "completed" | "killed" | "error" | "unknown"
+ * @returns {string} - "running" | "completed" | "killed" | "cancelled" | "interrupted" | "error" | "unknown"
  */
 export function evaluateSubagentStatus(childParsed, killedConversationIds, parentState) {
   if (!childParsed) return "unknown";
 
-  // 1. 父任务已成功完成，或该会话已被显式终止
-  if (parentState === "success" || parentState === "completed") {
-    return "completed";
-  }
+  // 1. 显式终止具有绝对最高优先级（胜过任何父任务成功或子代理声明）
   if (killedConversationIds && childParsed.conversation_id && killedConversationIds.has(childParsed.conversation_id)) {
     return "killed";
   }
 
   // 2. 检查子代理最近一次的主动执行步骤（优先使用 lastPlannerEntry 回退到 lastEntry）
   const activeEntry = childParsed.lastPlannerEntry || childParsed.lastEntry;
-  if (!activeEntry) return "running";
 
-  // 3. 若最后一步包含工具调用
-  if (Array.isArray(activeEntry.tool_calls) && activeEntry.tool_calls.length > 0) {
-    // 只要包含任何非 send_message 工具（如写文件、执行命令、读文件等物理动作），必定是活跃执行中
-    const hasActiveWorkTools = activeEntry.tool_calls.some(t => t && t.name !== "send_message");
-    if (hasActiveWorkTools) {
-      return "running";
-    }
-
-    // 若调用的全部为 send_message，提取所有消息内容合并判断
-    const messages = activeEntry.tool_calls
-      .filter(t => t && t.name === "send_message")
-      .map(t => String(t.args?.Message || ""))
-      .join(" ");
-
-    if (isExplicitlyCompleted(messages)) {
-      return "completed";
-    }
-
-    return "running";
-  }
-
-  // 4. 最后一步为纯回复（无工具调用）且状态为 DONE
-  if (activeEntry.type === "PLANNER_RESPONSE" && (!activeEntry.tool_calls || activeEntry.tool_calls.length === 0)) {
-    const text = String(activeEntry.content || "");
-    if (isExplicitlyCompleted(text)) {
-      return "completed";
+  // 3. 检查子代理自身是否已经显式完工（不可辩驳的事实证据）
+  let isChildExplicitlyDone = false;
+  if (activeEntry) {
+    if (Array.isArray(activeEntry.tool_calls) && activeEntry.tool_calls.length > 0) {
+      const hasActiveWorkTools = activeEntry.tool_calls.some(t => t && t.name !== "send_message");
+      if (!hasActiveWorkTools) {
+        const messages = activeEntry.tool_calls
+          .filter(t => t && t.name === "send_message")
+          .map(t => String(t.args?.Message || ""))
+          .join(" ");
+        if (isExplicitlyCompleted(messages)) {
+          isChildExplicitlyDone = true;
+        }
+      }
+    } else if (activeEntry.type === "PLANNER_RESPONSE" && (!activeEntry.tool_calls || activeEntry.tool_calls.length === 0)) {
+      const text = String(activeEntry.content || "");
+      if (isExplicitlyCompleted(text)) {
+        isChildExplicitlyDone = true;
+      }
     }
   }
 
-  // 5. 证据不足时严格保持 running，绝不误标已完成
+  if (isChildExplicitlyDone) {
+    return "completed";
+  }
+
+  // 4. 父任务非成功终态穿透收敛：若父任务已 cancelled, interrupted, error, timed_out，
+  // 未完成的子代理不能继续误留在 running，应同步收敛为相应终态
+  if (["cancelled", "interrupted", "error", "timed_out"].includes(parentState)) {
+    return parentState === "cancelled" ? "cancelled" : (parentState === "interrupted" ? "interrupted" : "error");
+  }
+
+  // 5. 父任务成功完成兜底：当父任务成功（success 或 completed），未被 killed 的子代理视为随父任务协同完成
+  if (parentState === "success" || parentState === "completed") {
+    return "completed";
+  }
+
+  // 6. 证据不足且处于运行态时严格保持 running，绝不误标已完成
   return "running";
+}
+
+// 缓存容量上限与淘汰工具
+const MAX_CACHE_ENTRIES = 200;
+function pruneCache(cacheMap) {
+  if (cacheMap.size >= MAX_CACHE_ENTRIES) {
+    const oldestKey = cacheMap.keys().next().value;
+    if (oldestKey !== undefined) {
+      cacheMap.delete(oldestKey);
+    }
+  }
 }
 
 // 文件级别 transcript 解析结果缓存：transcriptPath -> { mtimeMs, size, parsed }
 const transcriptCache = new Map();
+// 任务级别 log 解析结果缓存：logFile -> { mtimeMs, size, result }
+const logFallbackCache = new Map();
 
 /**
  * 递归解析 transcript 文件，提取实时运行状态与全员子代理微观工作明细
@@ -424,6 +446,7 @@ export function parseTranscript(transcriptPath, depth = 0, maxDepth = 8, visited
       recentActivities: recentActivities.slice(-100),
     };
     if (stats) {
+      pruneCache(transcriptCache);
       transcriptCache.set(transcriptPath, {
         mtimeMs: stats.mtimeMs,
         size: stats.size,
@@ -437,7 +460,7 @@ export function parseTranscript(transcriptPath, depth = 0, maxDepth = 8, visited
 }
 
 /**
- * 当 transcript 尚未生成时，从任务专用 log 文件中提取基础状态
+ * 当 transcript 尚未生成时，从任务专用 log 文件中提取基础状态（带 mtimeMs 缓存，避免每秒全量读取）
  * @param {string} logFile - 运行日志路径
  * @returns {object} - 基础阶段与摘要
  */
@@ -446,26 +469,37 @@ export function fallbackFromLog(logFile) {
     return { phase: "starting", message: "子代理进程启动中..." };
   }
   try {
+    const stats = fs.statSync(logFile);
+    const cached = logFallbackCache.get(logFile);
+    if (cached && cached.mtimeMs === stats.mtimeMs && cached.size === stats.size) {
+      return cached.result;
+    }
+
     const text = fs.readFileSync(logFile, "utf8");
     const rounds = (text.match(/streamGenerateContent\?alt=sse/g) || []).length;
     const hasTeamwork = text.includes('expanded slash command "teamwork-preview"');
     const isAuthDone = text.includes("OAuth: authenticated") || text.includes("silent auth succeeded");
 
+    let result = { phase: "starting", message: "CLI 引擎初始化中..." };
     if (rounds > 0) {
-      return {
+      result = {
         phase: hasTeamwork ? "teamwork_collaborating" : "thinking",
         rounds,
         message: hasTeamwork
           ? `多智能体团队正在协同工作中（已完成 ${rounds} 轮模型推理）`
           : `模型正在深入思考与生成（已完成 ${rounds} 轮模型推理）`,
       };
+    } else if (isAuthDone) {
+      result = { phase: "initializing", message: "认证已完成，正在装载工作区上下文并展开指令..." };
     }
 
-    if (isAuthDone) {
-      return { phase: "initializing", message: "认证已完成，正在装载工作区上下文并展开指令..." };
-    }
-
-    return { phase: "starting", message: "CLI 引擎初始化中..." };
+    pruneCache(logFallbackCache);
+    logFallbackCache.set(logFile, {
+      mtimeMs: stats.mtimeMs,
+      size: stats.size,
+      result,
+    });
+    return result;
   } catch {
     return { phase: "starting", message: "任务启动中..." };
   }
@@ -512,12 +546,12 @@ export function getTaskProgress(job) {
     currentAction = fallbackInfo.message;
   }
 
-  // 格式化并清洗所有子代理的微观动作
+  // 格式化并清洗所有子代理的微观动作（尊重真实的 sub.status，绝不暴力洗绿覆盖）
   const formattedSubagents = (transcriptInfo?.subagents || []).map((sub) => ({
     role: sub.role,
     type: sub.type,
     conversation_id: sub.conversation_id,
-    status: job.state === "success" ? "completed" : sub.status,
+    status: sub.status,
     step: sub.step,
     current_action: sanitizeDiagnostics(sub.current_action, 150),
     last_tool: sub.last_tool,

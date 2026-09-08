@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { exec } from "node:child_process";
-import { restorePersistedJobs, persistJob } from "./storage.mjs";
+import { restorePersistedJobs, persistJob, loadPersistedJobsRaw, JOBS_DIR } from "./storage.mjs";
 import { getTaskProgress } from "./progress.mjs";
 import { cancelJob } from "./process-control.mjs";
 import { sanitizeDiagnostics } from "./diagnostics.mjs";
@@ -14,7 +14,10 @@ const WEB_ROOT = path.resolve(__dirname, "web");
 const HTML_FILE = path.join(WEB_ROOT, "index.html");
 
 const DEFAULT_PORT = Number(process.env.ANTIGRAVITY_DASHBOARD_PORT) || 3721;
-const DASHBOARD_VERSION = "1.3.1";
+const DASHBOARD_VERSION = "1.3.2";
+
+// 物理日志读取尾部内存缓存：logFile -> { mtimeMs, size, tail }，避免每秒重复打开同步读取
+const logTailCache = new Map();
 
 /**
  * 格式化输出提供给前端看板的任务视图对象
@@ -34,18 +37,28 @@ export function formatJobDetail(job) {
     }
   }
 
-  // 尝试读取物理日志尾部（若有），并经过全量诊断脱敏
+  // 尝试读取物理日志尾部（若有），带 mtime/size 缓存并经过全量脱敏
   let logTail = "";
   const logFile = job.invocation?.log_file;
   if (logFile && fs.existsSync(logFile)) {
     try {
       const stats = fs.statSync(logFile);
-      const readBytes = Math.min(stats.size, 16 * 1024);
-      const buffer = Buffer.alloc(readBytes);
-      const fd = fs.openSync(logFile, "r");
-      fs.readSync(fd, buffer, 0, readBytes, Math.max(0, stats.size - readBytes));
-      fs.closeSync(fd);
-      logTail = sanitizeDiagnostics(buffer.toString("utf8"), 16 * 1024);
+      const cached = logTailCache.get(logFile);
+      if (cached && cached.mtimeMs === stats.mtimeMs && cached.size === stats.size) {
+        logTail = cached.tail;
+      } else {
+        const readBytes = Math.min(stats.size, 16 * 1024);
+        const buffer = Buffer.alloc(readBytes);
+        const fd = fs.openSync(logFile, "r");
+        fs.readSync(fd, buffer, 0, readBytes, Math.max(0, stats.size - readBytes));
+        fs.closeSync(fd);
+        logTail = sanitizeDiagnostics(buffer.toString("utf8"), 16 * 1024);
+        logTailCache.set(logFile, { mtimeMs: stats.mtimeMs, size: stats.size, tail: logTail });
+        if (logTailCache.size > 100) {
+          const oldestKey = logTailCache.keys().next().value;
+          logTailCache.delete(oldestKey);
+        }
+      }
     } catch {
       logTail = "";
     }
@@ -96,25 +109,6 @@ export function openInBrowser(targetUrl) {
   exec(cmd, () => {});
 }
 
-function loadDiskJobsRaw() {
-  const jobs = new Map();
-  const jobsDir = path.resolve(__dirname, "..", "data", "jobs");
-  if (!fs.existsSync(jobsDir)) return jobs;
-  try {
-    const files = fs.readdirSync(jobsDir).filter((f) => f.endsWith(".json"));
-    for (const file of files) {
-      try {
-        const text = fs.readFileSync(path.join(jobsDir, file), "utf8");
-        const data = JSON.parse(text);
-        if (data && data.jobId) {
-          jobs.set(data.jobId, data);
-        }
-      } catch {}
-    }
-  } catch {}
-  return jobs;
-}
-
 /**
  * 启动可视化看板 HTTP & SSE 服务
  * @param {object} options
@@ -132,7 +126,7 @@ export function startDashboardServer(options = {}) {
     if (memoryJobs) {
       return Array.from(memoryJobs.values());
     }
-    const diskJobs = loadDiskJobsRaw();
+    const diskJobs = loadPersistedJobsRaw();
     return Array.from(diskJobs.values());
   }
 
@@ -140,21 +134,44 @@ export function startDashboardServer(options = {}) {
     if (memoryJobs && memoryJobs.has(id)) {
       return memoryJobs.get(id);
     }
-    const diskJobs = loadDiskJobsRaw();
+    const diskJobs = loadPersistedJobsRaw();
     return diskJobs.get(id) || null;
   }
 
   const server = http.createServer(async (req, res) => {
+    // 检查 Host 头，防止 DNS Rebinding 攻击（只允许 localhost / 127.0.0.1 及其带端口的形式）
+    const host = req.headers.host || "";
+    if (host && !/^(localhost|127\.0\.0\.1)(:\d+)?$/i.test(host)) {
+      res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ error: "Bad Request: Invalid Host header" }));
+      return;
+    }
+
     // 跨域支持与预检（收紧来源，仅允许本地 localhost/127.0.0.1 或同源请求）
     const origin = req.headers.origin;
-    if (origin && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
+    const isLocalOrigin = !origin || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
+
+    if (origin && isLocalOrigin) {
       res.setHeader("Access-Control-Allow-Origin", origin);
       res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
       res.setHeader("Access-Control-Allow-Headers", "Content-Type");
     }
+
     if (req.method === "OPTIONS") {
+      if (!isLocalOrigin) {
+        res.writeHead(403, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "Forbidden: Cross-origin request not allowed" }));
+        return;
+      }
       res.writeHead(204);
       res.end();
+      return;
+    }
+
+    // 对产生副作用的请求（如 POST），若带非本地 Origin，必须直接拒绝 403
+    if (req.method === "POST" && !isLocalOrigin) {
+      res.writeHead(403, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ error: "Forbidden: Cross-origin POST request rejected" }));
       return;
     }
 
@@ -225,15 +242,24 @@ export function startDashboardServer(options = {}) {
         return;
       }
 
-      // 独立模式假取消拦截：当任务处于活跃子进程运行状态时，必须拥有子进程句柄才能真正执行进程树强杀
-      // 若当前看板进程无 child 句柄（即独立进程 npm run dashboard），严禁伪造取消和改写磁盘，避免跨进程状态冲突与幽灵进程
+      // 独立模式（无 memoryJobs 共享）：只读监控看板，禁止发起任何取消操作，避免跨进程状态冲突与幽灵进程
+      if (!memoryJobs) {
+        res.writeHead(409, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({
+          error: `无法在独立看板中取消任务 ${jobId}：独立看板仅提供只读监控。请在宿主 MCP 进程或客户端中执行取消，禁止跨进程篡改状态。`,
+          code: "STANDALONE_CANCEL_FORBIDDEN",
+        }));
+        return;
+      }
+
+      // 集成模式下的兜底保护：若处于运行态但失去了进程句柄，也拒绝假取消
       const isProcessRunning = ["running", "stopping"].includes(job.state);
       const hasLiveHandle = Boolean(job.child && typeof job.child.kill === "function");
       if (isProcessRunning && !hasLiveHandle) {
         res.writeHead(409, { "Content-Type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({
-          error: `无法在独立看板中取消任务 ${jobId}：该任务的执行子进程受宿主 MCP 进程管理。请直接在宿主 MCP 或客户端中取消，禁止跨进程篡改状态。`,
-          code: "STANDALONE_CANCEL_FORBIDDEN",
+          error: `无法取消任务 ${jobId}：丢失进程句柄。`,
+          code: "PROCESS_HANDLE_LOST",
         }));
         return;
       }
@@ -319,6 +345,9 @@ export function startDashboardServer(options = {}) {
               try { client.end(); } catch {}
             }
             sseClients.clear();
+            if (typeof server.closeAllConnections === "function") {
+              server.closeAllConnections();
+            }
             server.close(() => res());
           }),
         });

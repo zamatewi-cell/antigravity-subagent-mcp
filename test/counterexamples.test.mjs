@@ -8,6 +8,7 @@ import { Client } from "@modelcontextprotocol/client";
 import * as z from "zod/v4";
 import { parseTranscript, evaluateSubagentStatus, formatToolAction, getTaskProgress } from "../src/progress.mjs";
 import { persistJob, restorePersistedJobs } from "../src/storage.mjs";
+import { withDirectoryLock } from "../src/server.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-counterexamples-"));
@@ -235,32 +236,15 @@ try {
   assert.equal(receivedNotifications[0].message, "处理中...");
   console.log("  -> PASS: 进度通知实际送达客户端");
 
-  // 7. 反例 7：同目录排队排他性验证
-  console.log("\n[Test 7] 验证同一工作目录下的任务互斥排队...");
-  const queueLocks = new Map();
-  async function testDirectoryLock(dir, fn) {
-    const norm = path.resolve(dir);
-    while (queueLocks.has(norm)) {
-      await queueLocks.get(norm);
-    }
-    let release;
-    const p = new Promise(r => { release = r; });
-    queueLocks.set(norm, p);
-    try {
-      return await fn();
-    } finally {
-      queueLocks.delete(norm);
-      release();
-    }
-  }
-
+  // 7. 反例 7：同目录排队排他性验证（直接测试生产导出的 withDirectoryLock，拒绝手写副本）
+  console.log("\n[Test 7] 验证同一工作目录下的任务互斥排队（基于生产真实 withDirectoryLock）...");
   const executionOrder = [];
-  const task1 = testDirectoryLock("D:/same/dir", async () => {
+  const task1 = withDirectoryLock("D:/same/dir", null, async () => {
     executionOrder.push("task1-start");
     await new Promise(r => setTimeout(r, 60));
     executionOrder.push("task1-end");
   });
-  const task2 = testDirectoryLock("D:/same/dir", async () => {
+  const task2 = withDirectoryLock("D:/same/dir", null, async () => {
     executionOrder.push("task2-start");
     await new Promise(r => setTimeout(r, 20));
     executionOrder.push("task2-end");
@@ -443,7 +427,11 @@ try {
   };
   const killedStatus = evaluateSubagentStatus(mockKilledSubagent, killedIds, "running");
   assert.equal(killedStatus, "killed", "被终止的子代理必须判定为 killed，严禁逻辑反转判定为 completed！");
-  console.log("  -> PASS: 被终止子代理正确判定为 killed");
+
+  // 验证父任务最终成功时，显式 killed 的子代理绝对不能被洗绿为 completed
+  const killedStatusWhenParentSuccess = evaluateSubagentStatus(mockKilledSubagent, killedIds, "success");
+  assert.equal(killedStatusWhenParentSuccess, "killed", "父任务成功后，显式 killed 的子代理必须依然保持 killed，绝对不能被洗绿为 completed！");
+  console.log("  -> PASS: 被终止子代理正确判定为 killed，且父任务成功后绝不发生洗绿漂移");
 
   // 15. 反例 15：重启纠偏后的 interrupted 任务真实原子写回磁盘
   console.log("\n[Test 15] 验证重启纠偏后的任务原子持久化落盘（消除磁盘脏数据）...");

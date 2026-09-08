@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { sanitizeDiagnostics } from "./diagnostics.mjs";
 
 const SERVER_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const JOBS_DIR = process.env.ANTIGRAVITY_MCP_DATA_DIR
+export const JOBS_DIR = process.env.ANTIGRAVITY_MCP_DATA_DIR
   ? path.join(process.env.ANTIGRAVITY_MCP_DATA_DIR, "jobs")
   : path.join(SERVER_ROOT, "data", "jobs");
 
@@ -12,6 +12,39 @@ try {
   fs.mkdirSync(JOBS_DIR, { recursive: true });
 } catch {
   // 忽略已存在异常
+}
+
+// 磁盘任务原始数据缓存：fileName -> { mtimeMs, job }，避免独立看板每秒全量反序列化导致内存引用丢失
+const diskJobsCache = new Map();
+
+/**
+ * 从磁盘读取所有持久化任务，利用文件 mtime 缓存复用已有对象
+ * @returns {Map<string, object>}
+ */
+export function loadPersistedJobsRaw() {
+  const jobs = new Map();
+  if (!fs.existsSync(JOBS_DIR)) return jobs;
+  try {
+    const files = fs.readdirSync(JOBS_DIR).filter((f) => f.endsWith(".json"));
+    for (const file of files) {
+      const fullPath = path.join(JOBS_DIR, file);
+      try {
+        const stats = fs.statSync(fullPath);
+        const cached = diskJobsCache.get(file);
+        if (cached && cached.mtimeMs === stats.mtimeMs) {
+          jobs.set(cached.job.jobId, cached.job);
+          continue;
+        }
+        const text = fs.readFileSync(fullPath, "utf8");
+        const data = JSON.parse(text);
+        if (data && data.jobId) {
+          diskJobsCache.set(file, { mtimeMs: stats.mtimeMs, job: data });
+          jobs.set(data.jobId, data);
+        }
+      } catch {}
+    }
+  } catch {}
+  return jobs;
 }
 
 import { randomUUID } from "node:crypto";

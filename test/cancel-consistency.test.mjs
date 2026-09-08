@@ -174,6 +174,49 @@ async function runTests() {
     try { fs.unlinkSync(path.join(jobsDir, `${fakeStandaloneJob.jobId}.json`)); } catch {}
   }
 
+  console.log("--- 4.1 测试独立 Dashboard 拦截排队中任务（queued）的假取消 ---");
+  const fakeQueuedStandaloneJob = {
+    jobId: "test-standalone-queued-" + Date.now(),
+    state: "queued",
+    startedAt: new Date().toISOString(),
+    completedAt: null,
+    invocation: { prompt: "standalone queued fake cancel test", cwd: process.cwd() },
+    result: null,
+  };
+  fs.writeFileSync(path.join(jobsDir, `${fakeQueuedStandaloneJob.jobId}.json`), JSON.stringify(fakeQueuedStandaloneJob, null, 2), "utf8");
+
+  const standaloneQueuedInstance = await startDashboardServer({
+    port: 13727,
+    autoOpen: false,
+  });
+
+  try {
+    const postQueuedRes = await new Promise((resolve, reject) => {
+      const req = http.request({
+        hostname: "localhost",
+        port: 13727,
+        path: `/api/jobs/${fakeQueuedStandaloneJob.jobId}/cancel`,
+        method: "POST",
+      }, (res) => {
+        let body = "";
+        res.on("data", (chunk) => body += chunk);
+        res.on("end", () => resolve({ statusCode: res.statusCode, body: JSON.parse(body) }));
+      });
+      req.on("error", reject);
+      req.end();
+    });
+
+    assert.equal(postQueuedRes.statusCode, 409, "独立看板无论任务是 running 还是 queued，均必须返回 409 Conflict（纯只读）！");
+    assert.equal(postQueuedRes.body.code, "STANDALONE_CANCEL_FORBIDDEN");
+
+    const diskQueuedAfter = JSON.parse(fs.readFileSync(path.join(jobsDir, `${fakeQueuedStandaloneJob.jobId}.json`), "utf8"));
+    assert.equal(diskQueuedAfter.state, "queued", "独立看板对 queued 任务也绝不能改写磁盘为 cancelled！");
+    console.log("✔ 独立看板对 queued 任务的只读拦截与防篡改验证通过");
+  } finally {
+    await standaloneQueuedInstance.close();
+    try { fs.unlinkSync(path.join(jobsDir, `${fakeQueuedStandaloneJob.jobId}.json`)); } catch {}
+  }
+
   console.log("--- 5. 测试首发终止原因胜出保护（不抹杀 timed_out / output_limit 语义） ---");
   const timeoutJob = {
     jobId: "test-timeout-job-" + Date.now(),

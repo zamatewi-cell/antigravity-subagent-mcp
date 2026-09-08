@@ -12,7 +12,7 @@ import { getTaskProgress } from "./progress.mjs";
 import { persistJob, restorePersistedJobs } from "./storage.mjs";
 import { startDashboardServer, openInBrowser } from "./dashboard.mjs";
 
-const SERVER_VERSION = "1.3.0";
+const SERVER_VERSION = "1.3.2";
 const DEFAULT_MODEL = process.env.ANTIGRAVITY_DEFAULT_MODEL || "gemini-3.8-flash-high";
 const DEFAULT_PERMISSION_MODE = process.env.ANTIGRAVITY_PERMISSION_MODE || "auto-approve";
 const DEFAULT_TIMEOUT_SECONDS = 300;
@@ -274,7 +274,7 @@ const directoryQueueLocks = new Map();
 /**
  * 同一工作目录并发排队锁，防止多个 Antigravity 实例并发操作同一目录
  */
-async function withDirectoryLock(rawDir, signal, fn) {
+export async function withDirectoryLock(rawDir, signal, fn) {
   const normDir = path.resolve(rawDir || process.env.ANTIGRAVITY_DEFAULT_CWD || process.cwd());
   while (directoryQueueLocks.has(normDir)) {
     if (signal?.aborted) throw new Error("等待同目录排队锁时操作被取消。");
