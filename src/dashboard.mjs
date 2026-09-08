@@ -46,7 +46,7 @@ export function formatJobDetail(job) {
     startedAt: job.startedAt,
     completedAt: job.completedAt,
     invocation: {
-      prompt: job.invocation?.prompt || "",
+      prompt: job.invocation?.prompt || job.invocation?.slash_command || (job.result?.response ? job.result.response.slice(0, 120).replace(/\r?\n/g, ' ') : "") || "",
       cwd: job.invocation?.cwd || "",
       model: job.invocation?.model || "",
       slash_command: job.invocation?.slash_command || null,

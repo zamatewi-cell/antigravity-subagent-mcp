@@ -679,7 +679,7 @@
 
       container.innerHTML = currentJobs.map((job) => {
         const isSelected = job.jobId === selectedJobId;
-        const shortPrompt = (job.invocation.prompt || "无提示词").slice(0, 80);
+        const shortPrompt = (job.invocation.prompt || job.invocation.slash_command || "未命名任务").slice(0, 80);
         const subCount = job.progress?.subagents?.length || 0;
         const timeStr = job.startedAt ? new Date(job.startedAt).toLocaleTimeString() : "";
 
@@ -715,7 +715,7 @@
       container.style.display = "block";
 
       // 填入头部数据
-      document.getElementById("bannerPrompt").innerText = job.invocation.prompt || "无提示词";
+      document.getElementById("bannerPrompt").innerText = job.invocation.prompt || job.invocation.slash_command || "未命名任务";
       document.getElementById("metaJobId").innerText = job.jobId;
       document.getElementById("metaModel").innerText = job.invocation.model || "默认模型";
       document.getElementById("metaCwd").innerText = job.invocation.cwd || "-";
