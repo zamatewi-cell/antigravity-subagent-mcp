@@ -8,8 +8,10 @@ import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import * as z from "zod/v4";
 import { enrichAgyResult, sanitizeDiagnostics } from "./diagnostics.mjs";
 import { stopProcessTree, isRetryablePreflightFailure } from "./process-control.mjs";
+import { getTaskProgress } from "./progress.mjs";
+import { persistJob, restorePersistedJobs } from "./storage.mjs";
 
-const SERVER_VERSION = "1.0.3";
+const SERVER_VERSION = "1.1.0";
 const DEFAULT_MODEL = process.env.ANTIGRAVITY_DEFAULT_MODEL || "gemini-3.8-flash-high";
 const DEFAULT_PERMISSION_MODE = process.env.ANTIGRAVITY_PERMISSION_MODE || "auto-approve";
 const DEFAULT_TIMEOUT_SECONDS = 300;
@@ -35,7 +37,7 @@ const AGY_CLI = resolveAgyCliPath();
 const SERVER_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DIAGNOSTIC_LOG_DIR = process.env.ANTIGRAVITY_MCP_LOG_DIR || path.join(SERVER_ROOT, "logs");
 fs.mkdirSync(DIAGNOSTIC_LOG_DIR, { recursive: true });
-const jobs = new Map();
+const jobs = restorePersistedJobs();
 
 const invocationSchema = z.object({
   prompt: z.string().trim().min(1).describe(
@@ -186,6 +188,7 @@ function launchAgy(input, jobId = randomUUID()) {
   });
   job.child = child;
   jobs.set(jobId, job);
+  persistJob(job);
 
   const append = (field, chunk) => {
     if (job.stopReason) return;
@@ -210,6 +213,7 @@ function launchAgy(input, jobId = randomUUID()) {
         response: "",
         error: sanitizeDiagnostics(`无法启动 Antigravity CLI：${error.message}`),
       };
+      persistJob(job);
       resolve(job);
     });
 
@@ -250,6 +254,7 @@ function launchAgy(input, jobId = randomUUID()) {
         job.state = "error";
       }
       job.completedAt = new Date().toISOString();
+      persistJob(job);
       resolve(job);
     });
   });
@@ -287,6 +292,7 @@ function publicJob(job, includeResult = true) {
     working_directory: job.invocation.cwd,
     slash_command: job.invocation.slash_command,
     attempts: job.attempts,
+    progress: getTaskProgress(job),
   };
   if (includeResult && job.result) output.result = job.result;
   if (includeResult && job.state === "error" && job.stderr) {
@@ -305,15 +311,39 @@ function toolResponse(payload, isError = false) {
   };
 }
 
-async function runWithPreflightRetry(input, signal) {
+async function runWithPreflightRetry(input, signal, ctx) {
   const attempts = [];
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     if (signal?.aborted) throw new Error("MCP 调用已取消，未启动新任务。");
     const job = launchAgy(input);
     const abort = () => { void stopJob(job, "cancelled"); };
     signal?.addEventListener("abort", abort, { once: true });
+
+    // 定期向客户端上报进度通知（若客户端支持 progressToken）
+    const progressTimer = setInterval(() => {
+      if (job.state !== "running" && job.state !== "stopping") {
+        clearInterval(progressTimer);
+        return;
+      }
+      try {
+        const prog = getTaskProgress(job);
+        const token = ctx?.mcpReq?.params?._meta?.progressToken;
+        if (ctx?.sendProgressNotification && token !== undefined) {
+          ctx.sendProgressNotification({
+            progressToken: token,
+            progress: prog.current_step,
+            total: Math.max(prog.current_step + 1, 10),
+            message: `[${prog.phase}] ${prog.current_action}`,
+          }).catch(() => {});
+        }
+      } catch {}
+    }, 2000);
+
     try { await job.completion; }
-    finally { signal?.removeEventListener("abort", abort); }
+    finally {
+      clearInterval(progressTimer);
+      signal?.removeEventListener("abort", abort);
+    }
     attempts.push(job);
     if (!isRetryablePreflightFailure(job) || attempt === 3) {
       const result = publicJob(job);
@@ -405,7 +435,7 @@ server.registerTool(
   },
   async (input, ctx) => {
     try {
-      const { job, result } = await runWithPreflightRetry(input, ctx.mcpReq.signal);
+      const { job, result } = await runWithPreflightRetry(input, ctx.mcpReq.signal, ctx);
       return toolResponse(result, job.state !== "success");
     } catch (error) {
       return toolResponse({ status: "ERROR", error: error.message }, true);
@@ -463,12 +493,15 @@ server.registerTool(
       job.cancelRequested = true;
       job.state = "cancelled";
       job.completedAt = new Date().toISOString();
+      persistJob(job);
       return toolResponse(publicJob(job));
     }
     if (!["running", "stopping"].includes(job.state)) return toolResponse(publicJob(job), job.state === "error");
     await stopJob(job, "cancelled");
+    persistJob(job);
     if (job.terminationError) return toolResponse(publicJob(job), true);
     await job.completion;
+    persistJob(job);
     return toolResponse(publicJob(job));
   },
 );

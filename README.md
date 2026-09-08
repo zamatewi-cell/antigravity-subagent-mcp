@@ -23,6 +23,13 @@ The bridge never invokes `--disable-slash-commands`. It uses AGY's required
 Per-job AGY logs are stored under `logs/` so a bridge response can be matched to
 the original backend error without scanning unrelated global CLI logs.
 
+Version 1.1.0 changes:
+
+- **Real-time Progress & Activity Tracking**: `get_gemini_task` poll responses now include a structured `progress` object detailing the current step number, active tool call, action summary, spawned subagents list, and recent activity stream, eliminating the "blind running" limitation.
+- **MCP Progress Notification Stream**: `delegate_to_gemini` pushes live progress notifications every 2 seconds when caller provides a `progressToken`.
+- **Lightweight Job Persistence**: Jobs are continuously snapshot-persisted under `data/jobs/`. Server restarts automatically restore historical task records and mark uncompleted sessions as `interrupted`.
+- **Multi-path AGY Detection**: Enhances Windows binary detection across common installation roots before falling back to system `PATH`.
+
 Version 1.0.3 reliability changes:
 
 - Final CLI success takes precedence over recovered model errors, which appear
