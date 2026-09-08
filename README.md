@@ -23,6 +23,16 @@ The bridge never invokes `--disable-slash-commands`. It uses AGY's required
 Per-job AGY logs are stored under `logs/` so a bridge response can be matched to
 the original backend error without scanning unrelated global CLI logs.
 
+Version 1.2.1 changes:
+
+- **Strict Evidence-Based Lifecycle Evaluation**: Completely eliminated heuristic step count thresholds (e.g. step >= 30) and naive tool-name assumptions. Agents performing active tools (commands, edits) or asking questions remain strictly `running`; only explicit completion evidence (finished handoffs/verdicts or parent kills) marks `completed`. Inconclusive evidence defaults to `running`/`unknown`.
+- **Working MCP Progress Notification Stream**: Fixed progress notification delivery by resolving `progressToken` from both `_meta` and `params._meta`, and invoking SDK-standard `ctx.mcpReq.notify` rather than unreachable methods.
+- **Accurate Action Tracking & Stale Text Invalidation**: Tool activities now prioritize detailed parameters from `tc.args` (e.g. `toolSummary`, command lines, filenames) over bare tool names. Consecutive tool executions reliably invalidate and overwrite prior text reflections in `current_action`.
+- **Deep Hierarchy Traversal (Depth >= 8)**: Expanded subagent cascade recursion depth to 8 with generalized conversation ID resolution and cycle protection, preventing truncation on 5+ tier agent chains.
+- **Atomic Persistence & Consistent Restart State**: Jobs are written atomically via temporary files (`.tmp` -> rename) with automated quarantine for corrupted JSON records. Interrupted tasks post-restart consistently report `state: interrupted`, `isError: true`, and `progress.phase: interrupted`.
+- **Directory Concurrency Lock**: Added asynchronous per-workspace serialization lock to prevent conflicting concurrent Antigravity executions in the same working directory.
+- **Handshake Version Parity**: Synchronized server handshake version to `1.2.1`.
+
 Version 1.2.0 changes:
 
 - **Deep Cascade Subagent Inspection (God's-eye View)**: Recursively penetrates and parses independent subagent conversation transcripts for all spawned Workers (e.g. Worker A, Worker B, Victory Auditor). Exposes fine-grained execution steps (`step`), live micro-actions (`current_action`), active tools (`last_tool`), lifecycle statuses, and individual activity trails directly in the `subagents` list.

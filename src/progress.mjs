@@ -89,23 +89,124 @@ function parseSubagentsArg(raw) {
 }
 
 /**
- * 从工具输出文本中提取所有的 conversationId UUID
+ * 从工具输出文本中提取所有的 conversationId
  */
 function extractConversationIds(text) {
   if (!text) return [];
-  const matches = [...text.matchAll(/(?:conversationId["']?\s*:\s*["'])([0-9a-fA-F-]{36})/g)];
+  const matches = [...text.matchAll(/(?:conversationId["']?\s*:\s*["'])([^"'\r\n\s]+)/g)];
   return matches.map((m) => m[1]);
+}
+
+/**
+ * 格式化工具动作，优先读取参数中的描述或具体参数细节，杜绝裸工具名
+ * @param {object} tc - tool call 对象
+ * @returns {string} - 具体的动作描述
+ */
+export function formatToolAction(tc) {
+  if (!tc) return "执行未知操作";
+  const toolName = tc.name || "unknown_tool";
+  const args = tc.args || {};
+
+  // 1. 优先提取 toolSummary 或 toolAction
+  const explicitSummary = args.toolSummary || args.toolAction || tc.toolSummary || tc.toolAction;
+  if (explicitSummary && typeof explicitSummary === "string" && explicitSummary.trim()) {
+    return `[${toolName}] ${explicitSummary.trim().replace(/^["']|["']$/g, "")}`;
+  }
+
+  // 2. 依据具体工具参数提取具备可读性的关键细节
+  if (toolName === "run_command" && args.CommandLine) {
+    const cmd = String(args.CommandLine).replace(/^["']|["']$/g, "").trim();
+    return `[run_command] 运行: ${cmd.slice(0, 100)}`;
+  }
+  if (toolName === "write_to_file" && args.TargetFile) {
+    const file = path.basename(String(args.TargetFile).replace(/^["']|["']$/g, "").trim());
+    return `[write_to_file] 写入: ${file}`;
+  }
+  if (toolName === "view_file" && args.AbsolutePath) {
+    const file = path.basename(String(args.AbsolutePath).replace(/^["']|["']$/g, "").trim());
+    return `[view_file] 查看: ${file}`;
+  }
+  if (toolName === "replace_file_content" && args.TargetFile) {
+    const file = path.basename(String(args.TargetFile).replace(/^["']|["']$/g, "").trim());
+    return `[replace_file_content] 修改: ${file}`;
+  }
+  if (toolName === "invoke_subagent") {
+    return `[invoke_subagent] 派发团队子代理`;
+  }
+  if (toolName === "send_message") {
+    const msg = String(args.Message || "").replace(/^["']|["']$/g, "").trim();
+    return `[send_message] 消息: ${msg.slice(0, 60)}`;
+  }
+  if (toolName === "manage_subagents") {
+    const act = args.Action || "manage";
+    return `[manage_subagents] ${act}`;
+  }
+
+  return `[${toolName}] 执行操作`;
+}
+
+/**
+ * 依据明确的结束事件判断子代理状态，绝不依据步数猜测，证据不足维持 running
+ * @param {object} childParsed - 子代理 transcript 解析结果
+ * @param {Set<string>} killedConversationIds - 父代理中被显式 kill 的会话 ID 集合
+ * @param {string} parentState - 父任务整体状态
+ * @returns {string} - "running" | "completed" | "error" | "unknown"
+ */
+export function evaluateSubagentStatus(childParsed, killedConversationIds, parentState) {
+  if (!childParsed) return "unknown";
+
+  // 1. 父任务已成功完成，或该会话已被显式终止
+  if (parentState === "success" || parentState === "completed") {
+    return "completed";
+  }
+  if (killedConversationIds && childParsed.conversation_id && killedConversationIds.has(childParsed.conversation_id)) {
+    return "completed";
+  }
+
+  // 2. 检查子代理日志最后一步
+  const lastEntry = childParsed.lastEntry;
+  if (!lastEntry) return "running";
+
+  // 若最后一步依然包含活跃工作工具（如运行命令、读写文件），坚决为 running
+  if (Array.isArray(lastEntry.tool_calls) && lastEntry.tool_calls.length > 0) {
+    const firstTool = lastEntry.tool_calls[0];
+    if (firstTool.name !== "send_message") {
+      return "running";
+    }
+
+    // 若调用了 send_message，仅当消息明确包含交付证据且不含求助/中间询问时，才视为完成
+    const msg = String(firstTool.args?.Message || "");
+    const isCompleted = /(?:任务完成|交付|完工|VICTORY CONFIRMED|handoff\.md|audit report|verdict)/i.test(msg);
+    const isAskingOrIntermediate = /(?:求助|请示|询问|确认|是否|等待|进展|定时汇报|心跳|help|guidance|proceed\?)/i.test(msg);
+    if (isCompleted && !isAskingOrIntermediate) {
+      return "completed";
+    }
+
+    return "running";
+  }
+
+  // 3. 最后一步为纯回复（无工具调用）且状态为 DONE
+  if (lastEntry.type === "PLANNER_RESPONSE" && (!lastEntry.tool_calls || lastEntry.tool_calls.length === 0)) {
+    const text = String(lastEntry.content || "");
+    if (/(?:任务已完成|已全部完成|已交付成果|工作已结束|VICTORY)/i.test(text)) {
+      return "completed";
+    }
+  }
+
+  // 4. 证据不足时严格保持 running，绝不误标已完成
+  return "running";
 }
 
 /**
  * 递归解析 transcript 文件，提取实时运行状态与全员子代理微观工作明细
  * @param {string} transcriptPath - transcript 文件绝对路径
  * @param {number} depth - 当前递归层级（防止无限嵌套）
- * @param {number} maxDepth - 最大递归深度
+ * @param {number} maxDepth - 最大递归深度（默认支持8级深度）
  * @param {Set<string>} visited - 已遍历文件集合
+ * @param {string} parentState - 父任务生命周期状态
  * @returns {object|null} - 结构化状态
  */
-export function parseTranscript(transcriptPath, depth = 0, maxDepth = 3, visited = new Set()) {
+export function parseTranscript(transcriptPath, depth = 0, maxDepth = 8, visited = new Set(), parentState = "running") {
   if (!transcriptPath || !fs.existsSync(transcriptPath)) return null;
   if (visited.has(transcriptPath)) return null;
   visited.add(transcriptPath);
@@ -119,14 +220,17 @@ export function parseTranscript(transcriptPath, depth = 0, maxDepth = 3, visited
     let currentAction = "";
     let lastTool = null;
     let lastThinking = "";
+    let lastEntry = null;
     const pendingSubagents = [];
     const directSubagents = [];
     const recentActivities = [];
+    const killedConversationIds = new Set();
 
     for (let i = 0; i < lines.length; i++) {
       const entry = safeParseJson(lines[i]);
       if (!entry) continue;
 
+      lastEntry = entry;
       if (typeof entry.step_index === "number") {
         currentStep = Math.max(currentStep, entry.step_index);
       }
@@ -146,9 +250,12 @@ export function parseTranscript(transcriptPath, depth = 0, maxDepth = 3, visited
           for (const tc of entry.tool_calls) {
             const toolName = tc.name || "unknown_tool";
             lastTool = toolName;
-            const actionDesc = tc.toolSummary || tc.toolAction || tc.name;
             const stepNum = typeof entry.step_index === "number" ? entry.step_index : currentStep;
-            recentActivities.push(`Step ${stepNum}: [${toolName}] ${actionDesc}`);
+            const actionText = formatToolAction(tc);
+            recentActivities.push(`Step ${stepNum}: ${actionText}`);
+
+            // 发生新的工具调用时，强制覆盖旧的文本摘要，避免界面陈旧滞后
+            currentAction = actionText;
 
             // 捕获子代理创建工具调用
             if (toolName === "invoke_subagent" && tc.args?.Subagents) {
@@ -162,6 +269,20 @@ export function parseTranscript(transcriptPath, depth = 0, maxDepth = 3, visited
                 };
                 pendingSubagents.push(item);
                 directSubagents.push(item);
+              }
+            }
+
+            // 捕获终止子代理工具调用
+            if (toolName === "manage_subagents") {
+              const act = tc.args?.Action;
+              if (act === "kill_all") {
+                for (const sub of directSubagents) {
+                  if (sub.conversation_id) killedConversationIds.add(sub.conversation_id);
+                }
+              } else if (act === "kill" && Array.isArray(tc.args?.ConversationIds)) {
+                for (const cid of tc.args.ConversationIds) {
+                  killedConversationIds.add(cid);
+                }
               }
             }
           }
@@ -202,7 +323,7 @@ export function parseTranscript(transcriptPath, depth = 0, maxDepth = 3, visited
         conversation_id: sub.conversation_id,
         status: sub.status,
         step: 0,
-        current_action: "初始化中...",
+        current_action: "等待调度中...",
         last_tool: null,
         recent_activities: [],
       };
@@ -210,13 +331,13 @@ export function parseTranscript(transcriptPath, depth = 0, maxDepth = 3, visited
       if (sub.conversation_id && depth < maxDepth) {
         const subTranscriptPath = locateTranscriptPath(sub.conversation_id);
         if (subTranscriptPath) {
-          const childParsed = parseTranscript(subTranscriptPath, depth + 1, maxDepth, visited);
+          const childParsed = parseTranscript(subTranscriptPath, depth + 1, maxDepth, visited, parentState);
           if (childParsed) {
+            childParsed.conversation_id = sub.conversation_id;
             subInfo.step = childParsed.currentStep;
             subInfo.current_action = childParsed.currentAction;
             subInfo.last_tool = childParsed.lastTool;
-            // 若子代理已发送交付报告或步数充足完成，则标记为已完成
-            subInfo.status = childParsed.lastTool === "send_message" || childParsed.currentStep >= 30 ? "completed" : "running";
+            subInfo.status = evaluateSubagentStatus(childParsed, killedConversationIds, parentState);
             subInfo.recent_activities = childParsed.recentActivities.slice(-3);
 
             // 递归汇总更深层子代理（孙代等），扁平展示给调用方
@@ -227,7 +348,10 @@ export function parseTranscript(transcriptPath, depth = 0, maxDepth = 3, visited
             }
           }
         }
+      } else if (sub.conversation_id) {
+        subInfo.current_action = "运行中（深度超出最大解析层级）";
       }
+
       allDiscoveredSubagents.push(subInfo);
     }
 
@@ -235,6 +359,7 @@ export function parseTranscript(transcriptPath, depth = 0, maxDepth = 3, visited
       currentStep,
       currentAction,
       lastTool,
+      lastEntry,
       subagents: allDiscoveredSubagents,
       recentActivities: recentActivities.slice(-5),
     };
@@ -294,13 +419,13 @@ export function getTaskProgress(job) {
   }
 
   const transcriptPath = locateTranscriptPath(conversationId);
-  const transcriptInfo = transcriptPath ? parseTranscript(transcriptPath) : null;
+  const transcriptInfo = transcriptPath ? parseTranscript(transcriptPath, 0, 8, new Set(), job.state) : null;
   const fallbackInfo = fallbackFromLog(job.invocation?.log_file);
 
   let phase = "running";
   if (job.state === "success") {
     phase = "completed";
-  } else if (job.state === "error" || job.state === "timed_out" || job.state === "cancelled") {
+  } else if (job.state === "error" || job.state === "timed_out" || job.state === "cancelled" || job.state === "interrupted") {
     phase = job.state;
   } else if (transcriptInfo?.subagents?.length > 0) {
     phase = "subagents_collaborating";
@@ -310,7 +435,14 @@ export function getTaskProgress(job) {
     phase = fallbackInfo.phase || "thinking";
   }
 
-  const currentAction = transcriptInfo?.currentAction || fallbackInfo.message || "任务处理中...";
+  let currentAction = "任务处理中...";
+  if (job.state === "interrupted") {
+    currentAction = "任务已中断（服务重启或异常终止）";
+  } else if (transcriptInfo?.currentAction) {
+    currentAction = transcriptInfo.currentAction;
+  } else if (fallbackInfo.message) {
+    currentAction = fallbackInfo.message;
+  }
 
   // 格式化并清洗所有子代理的微观动作
   const formattedSubagents = (transcriptInfo?.subagents || []).map((sub) => ({

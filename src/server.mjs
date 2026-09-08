@@ -11,7 +11,7 @@ import { stopProcessTree, isRetryablePreflightFailure } from "./process-control.
 import { getTaskProgress } from "./progress.mjs";
 import { persistJob, restorePersistedJobs } from "./storage.mjs";
 
-const SERVER_VERSION = "1.1.0";
+const SERVER_VERSION = "1.2.1";
 const DEFAULT_MODEL = process.env.ANTIGRAVITY_DEFAULT_MODEL || "gemini-3.8-flash-high";
 const DEFAULT_PERMISSION_MODE = process.env.ANTIGRAVITY_PERMISSION_MODE || "auto-approve";
 const DEFAULT_TIMEOUT_SECONDS = 300;
@@ -282,15 +282,49 @@ function stopJob(job, reason) {
   return job.stopPromise;
 }
 
+const directoryQueueLocks = new Map();
+
+/**
+ * 同一工作目录并发排队锁，防止多个 Antigravity 实例并发操作同一目录
+ */
+async function withDirectoryLock(rawDir, signal, fn) {
+  const normDir = path.resolve(rawDir || process.env.ANTIGRAVITY_DEFAULT_CWD || process.cwd());
+  while (directoryQueueLocks.has(normDir)) {
+    if (signal?.aborted) throw new Error("等待同目录排队锁时操作被取消。");
+    const prevLock = directoryQueueLocks.get(normDir);
+    await Promise.race([
+      prevLock,
+      new Promise((_, reject) => {
+        if (signal) {
+          signal.addEventListener("abort", () => reject(new Error("等待同目录排队锁时操作被取消。")), { once: true });
+        }
+      }),
+    ]);
+  }
+
+  let release;
+  const lockPromise = new Promise((resolve) => {
+    release = resolve;
+  });
+  directoryQueueLocks.set(normDir, lockPromise);
+
+  try {
+    return await fn();
+  } finally {
+    directoryQueueLocks.delete(normDir);
+    release();
+  }
+}
+
 function publicJob(job, includeResult = true) {
   const output = {
     job_id: job.jobId,
-    state: job.state === "retrying" ? "running" : job.state,
+    state: job.state,
     started_at: job.startedAt,
     completed_at: job.completedAt,
-    model: job.invocation.model,
-    working_directory: job.invocation.cwd,
-    slash_command: job.invocation.slash_command,
+    model: job.invocation?.model,
+    working_directory: job.invocation?.cwd,
+    slash_command: job.invocation?.slash_command,
     attempts: job.attempts,
     progress: getTaskProgress(job),
   };
@@ -298,8 +332,8 @@ function publicJob(job, includeResult = true) {
   if (includeResult && job.state === "error" && job.stderr) {
     output.diagnostic = sanitizeDiagnostics(job.stderr);
   }
-  if (includeResult && (job.state === "error" || job.state === "timed_out")) {
-    output.diagnostic_log = job.invocation.log_file;
+  if (includeResult && (["error", "timed_out", "interrupted"].includes(job.state))) {
+    output.diagnostic_log = job.invocation?.log_file;
   }
   return output;
 }
@@ -312,54 +346,73 @@ function toolResponse(payload, isError = false) {
 }
 
 async function runWithPreflightRetry(input, signal, ctx) {
-  const attempts = [];
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
-    if (signal?.aborted) throw new Error("MCP 调用已取消，未启动新任务。");
-    const job = launchAgy(input);
-    const abort = () => { void stopJob(job, "cancelled"); };
-    signal?.addEventListener("abort", abort, { once: true });
+  const cwd = input.working_directory || process.env.ANTIGRAVITY_DEFAULT_CWD || process.cwd();
+  return await withDirectoryLock(cwd, signal, async () => {
+    const attempts = [];
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      if (signal?.aborted) throw new Error("MCP 调用已取消，未启动新任务。");
+      const job = launchAgy(input);
+      const abort = () => { void stopJob(job, "cancelled"); };
+      signal?.addEventListener("abort", abort, { once: true });
 
-    // 定期向客户端上报进度通知（若客户端支持 progressToken）
-    const progressTimer = setInterval(() => {
-      if (job.state !== "running" && job.state !== "stopping") {
-        clearInterval(progressTimer);
-        return;
-      }
-      try {
-        const prog = getTaskProgress(job);
-        const token = ctx?.mcpReq?.params?._meta?.progressToken;
-        if (ctx?.sendProgressNotification && token !== undefined) {
-          ctx.sendProgressNotification({
-            progressToken: token,
-            progress: prog.current_step,
-            total: Math.max(prog.current_step + 1, 10),
-            message: `[${prog.phase}] ${prog.current_action}`,
-          }).catch(() => {});
+      // 定期向客户端上报进度通知（支持 ctx.mcpReq.notify 与 progressToken）
+      const progressTimer = setInterval(async () => {
+        if (job.state !== "running" && job.state !== "stopping") {
+          clearInterval(progressTimer);
+          return;
         }
-      } catch {}
-    }, 2000);
+        try {
+          const prog = getTaskProgress(job);
+          const token = ctx?.mcpReq?._meta?.progressToken ?? ctx?.mcpReq?.params?._meta?.progressToken;
+          if (token !== undefined) {
+            if (typeof ctx?.mcpReq?.notify === "function") {
+              await ctx.mcpReq.notify({
+                method: "notifications/progress",
+                params: {
+                  progressToken: token,
+                  progress: prog.current_step,
+                  total: Math.max(prog.current_step + 1, 10),
+                  message: `[${prog.phase}] ${prog.current_action}`,
+                },
+              });
+            } else if (typeof ctx?.sendProgressNotification === "function") {
+              await ctx.sendProgressNotification({
+                progressToken: token,
+                progress: prog.current_step,
+                total: Math.max(prog.current_step + 1, 10),
+                message: `[${prog.phase}] ${prog.current_action}`,
+              });
+            }
+          }
+        } catch {}
+      }, 2000);
 
-    try { await job.completion; }
-    finally {
-      clearInterval(progressTimer);
-      signal?.removeEventListener("abort", abort);
+      try { await job.completion; }
+      finally {
+        clearInterval(progressTimer);
+        signal?.removeEventListener("abort", abort);
+      }
+      attempts.push(job);
+      if (!isRetryablePreflightFailure(job) || attempt === 3) {
+        const result = publicJob(job);
+        result.attempts = attempts.length;
+        return { job, result };
+      }
+      const delayMs = attempt === 1 ? 1_500 : 5_000;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
-    attempts.push(job);
-    if (!isRetryablePreflightFailure(job) || attempt === 3) {
-      const result = publicJob(job);
-      result.attempts = attempts.length;
-      return { job, result };
-    }
-    const delayMs = attempt === 1 ? 1_500 : 5_000;
-    await new Promise((resolve) => setTimeout(resolve, delayMs));
-  }
-  throw new Error("Antigravity retry loop ended unexpectedly.");
+    throw new Error("Antigravity retry loop ended unexpectedly.");
+  });
 }
 
 function startWithPreflightRetry(input) {
   const jobId = randomUUID();
-  const firstJob = launchAgy(input, jobId);
-  void (async () => {
+  const cwd = input.working_directory || process.env.ANTIGRAVITY_DEFAULT_CWD || process.cwd();
+  let firstJob = null;
+
+  // 使用目录锁确保同目录异步后台任务也是串行排队运行
+  const backgroundExecution = withDirectoryLock(cwd, null, async () => {
+    firstJob = launchAgy(input, jobId);
     let currentJob = firstJob;
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       await currentJob.completion;
@@ -375,7 +428,7 @@ function startWithPreflightRetry(input) {
       retryJob.startedAt = firstJob.startedAt;
       currentJob = retryJob;
     }
-  })().catch((error) => {
+  }).catch((error) => {
     const current = jobs.get(jobId);
     if (current && !current.cancelRequested) {
       current.state = "error";
@@ -383,6 +436,23 @@ function startWithPreflightRetry(input) {
       current.result = { status: "ERROR", error: sanitizeDiagnostics(error.message) };
     }
   });
+
+  // 如果锁已被占用，先注册排队占位 job
+  if (!firstJob) {
+    firstJob = {
+      jobId,
+      state: "queued",
+      startedAt: new Date().toISOString(),
+      completedAt: null,
+      invocation: { cwd, model: input.model || DEFAULT_MODEL },
+      result: null,
+      attempts: 1,
+      completion: backgroundExecution,
+    };
+    jobs.set(jobId, firstJob);
+    persistJob(firstJob);
+  }
+
   return firstJob;
 }
 
@@ -474,7 +544,7 @@ server.registerTool(
   async ({ job_id }) => {
     const job = jobs.get(job_id);
     if (!job) return toolResponse({ status: "ERROR", error: `未找到任务：${job_id}` }, true);
-    return toolResponse(publicJob(job), job.state === "error" || job.state === "timed_out");
+    return toolResponse(publicJob(job), ["error", "timed_out", "interrupted"].includes(job.state));
   },
 );
 
