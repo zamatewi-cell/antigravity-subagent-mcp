@@ -23,6 +23,14 @@ The bridge never invokes `--disable-slash-commands`. It uses AGY's required
 Per-job AGY logs are stored under `logs/` so a bridge response can be matched to
 the original backend error without scanning unrelated global CLI logs.
 
+Version 1.3.3 changes:
+
+- **Two-Tier Parser Architecture & Decoupled Concurrency Locking**:
+  - **Dynamic Subagent State Penetration**: Refactored transcript parsing into a two-tier pipeline. Low-level `parseLocalTranscript` caches static, single-file syntax parsing with true LRU eviction, while high-level `parseTranscript` dynamically composes the live Agent Tree. Eliminates subagent state freezing where worker updates were shadowed by parent file caches, and enables instant child convergence upon parent cancellation.
+  - **Decoupled Directory Lock Module**: Extracted `withDirectoryLock` into standalone module `src/directory-lock.mjs`, entirely removing MCP bootstrap and server runtime side-effects from testing imports.
+  - **Memory & Cache Bounding**: Upgraded caches to true LRU eviction and instituted a 500-entry bounding cap on `diskJobsCache` in `storage.mjs`.
+  - **CI & Testing Suite Expansion**: Configured multi-OS GitHub Actions workflow (`.github/workflows/ci.yml`) and introduced `npm run test:offline` aggregating all offline unit and integration tests.
+
 Version 1.3.2 changes:
 
 - **Strict Lifecycle & State Machine Hardening**:

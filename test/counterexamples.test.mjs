@@ -6,12 +6,13 @@ import { fileURLToPath } from "node:url";
 import { McpServer, InMemoryTransport } from "@modelcontextprotocol/server";
 import { Client } from "@modelcontextprotocol/client";
 import * as z from "zod/v4";
-import { parseTranscript, evaluateSubagentStatus, formatToolAction, getTaskProgress } from "../src/progress.mjs";
+import { parseTranscript, parseLocalTranscript, evaluateSubagentStatus, formatToolAction, getTaskProgress } from "../src/progress.mjs";
 import { persistJob, restorePersistedJobs } from "../src/storage.mjs";
-import { withDirectoryLock } from "../src/server.mjs";
+import { withDirectoryLock } from "../src/directory-lock.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-counterexamples-"));
+process.env.ANTIGRAVITY_MCP_DATA_DIR = path.join(tempDir, "data", "jobs");
 
 try {
   console.log("=== 开始执行专项反例测试套件 ===");
@@ -443,17 +444,83 @@ try {
   console.log("  -> PASS: 纠偏状态成功原子落盘");
 
   // 16. 反例 16：transcript 文件的 mtime 与 size 缓存命中验证
-  console.log("\n[Test 16] 验证 transcript 解析结果缓存机制...");
+  console.log("\n[Test 16] 验证 transcript 底层语法解析缓存命中与真 LRU 机制...");
   const cacheTestFile = path.join(tempDir, "cache_test.jsonl");
   fs.writeFileSync(cacheTestFile, JSON.stringify({ step_index: 1, type: "PLANNER_RESPONSE", content: "第一步" }) + "\n", "utf8");
-  const firstParse = parseTranscript(cacheTestFile);
-  assert(firstParse, "初次解析必须成功");
-  assert.equal(firstParse.currentAction, "第一步");
-  const secondParse = parseTranscript(cacheTestFile);
-  assert.strictEqual(firstParse, secondParse, "在文件未修改时，第二次解析必须直接命中内存缓存对象！");
-  console.log("  -> PASS: transcript 缓存机制生效，大幅降低高频广播 I/O");
+  const firstLocal = parseLocalTranscript(cacheTestFile);
+  assert(firstLocal, "初次本地解析必须成功");
+  assert.equal(firstLocal.currentAction, "第一步");
+  const secondLocal = parseLocalTranscript(cacheTestFile);
+  assert.strictEqual(firstLocal, secondLocal, "在文件未修改时，底层单文件解析必须严格全等命中内存缓存对象！");
 
-  console.log("\n[All Tests Passed] 全部 16 项专项反例测试 100% 成功通过！\n");
+  const firstParse = parseTranscript(cacheTestFile);
+  const secondParse = parseTranscript(cacheTestFile);
+  assert.deepEqual(firstParse, secondParse, "上层动态聚合树结构在内容上完全一致");
+  console.log("  -> PASS: transcript 底层缓存生效，大幅降低高频广播 I/O");
+
+  // 17. 反例 17：父 transcript 不变时，子 transcript 步数增长绝不能被父缓存冻结
+  console.log("\n[Test 17] 验证父 transcript 缓存不冻结子代理的实时步数与动作（根治缓存回归）...");
+  const dynamicBrainDir = path.join(tempDir, ".gemini", "antigravity-cli", "brain");
+  const parentCid = "parent-freeze-test-cid";
+  const childCid = "child-growth-test-cid";
+  const parentLogDir = path.join(dynamicBrainDir, parentCid, ".system_generated", "logs");
+  const childLogDir = path.join(dynamicBrainDir, childCid, ".system_generated", "logs");
+  fs.mkdirSync(parentLogDir, { recursive: true });
+  fs.mkdirSync(childLogDir, { recursive: true });
+
+  const parentFile = path.join(parentLogDir, "transcript.jsonl");
+  const childFile = path.join(childLogDir, "transcript.jsonl");
+
+  // 父 transcript 启动了子代理
+  fs.writeFileSync(parentFile, [
+    JSON.stringify({ step_index: 0, type: "USER_INPUT", content: "启动团队" }),
+    JSON.stringify({
+      step_index: 1,
+      type: "PLANNER_RESPONSE",
+      tool_calls: [{ name: "invoke_subagent", args: { Subagents: [{ Role: "Worker Dynamic", TypeName: "dynamic_worker" }] } }]
+    }),
+    JSON.stringify({
+      step_index: 2,
+      type: "GENERIC",
+      content: `Created the following subagents:\n{\n  "conversationId": "${childCid}"\n}`
+    }),
+  ].join("\n"), "utf8");
+
+  // 子代理初始处于第 1 步
+  fs.writeFileSync(childFile, JSON.stringify({
+    step_index: 1,
+    type: "PLANNER_RESPONSE",
+    content: "子代理刚刚启动..."
+  }) + "\n", "utf8");
+
+  const origUserProfileForDynamic = process.env.USERPROFILE;
+  process.env.USERPROFILE = tempDir;
+
+  const dynamicParse1 = parseTranscript(parentFile, 0, 8, new Set(), "running");
+  assert(dynamicParse1, "第一次父解析必须成功");
+  assert.equal(dynamicParse1.subagents.length, 1);
+  assert.equal(dynamicParse1.subagents[0].step, 1, "初次解析子代理步数应为 1");
+
+  // 此时子代理快速推进到了第 40 步，而父 transcript 保持静止没有任何修改！
+  fs.appendFileSync(childFile, JSON.stringify({
+    step_index: 40,
+    type: "PLANNER_RESPONSE",
+    tool_calls: [{ name: "run_command", args: { CommandLine: "cargo test --release" } }]
+  }) + "\n", "utf8");
+
+  const dynamicParse2 = parseTranscript(parentFile, 0, 8, new Set(), "running");
+  assert.equal(dynamicParse2.subagents[0].step, 40, "子代理更新后，再次解析父 transcript 必须实时穿透到第 40 步，绝对不能被父文件旧缓存冻结在第 1 步！");
+  assert(dynamicParse2.subagents[0].current_action.includes("cargo test"), "子代理最新动作必须实时更新，绝不能陈旧！");
+  console.log("  -> PASS: 子代理动态步数与动作成功穿透父缓存");
+
+  // 18. 反例 18：父 transcript 不变但 parentState 变为 cancelled 时，子代理状态必须即时收敛
+  console.log("\n[Test 18] 验证父任务取消时子代理状态收敛穿透缓存...");
+  const dynamicParseCancelled = parseTranscript(parentFile, 0, 8, new Set(), "cancelled");
+  process.env.USERPROFILE = origUserProfileForDynamic;
+  assert.equal(dynamicParseCancelled.subagents[0].status, "cancelled", "父状态变为 cancelled 时，子代理必须即时收敛为 cancelled，绝不能被旧缓存的 running 覆盖！");
+  console.log("  -> PASS: 父任务终态穿透即时收敛生效");
+
+  console.log("\n[All Tests Passed] 全部 18 项专项反例测试 100% 成功通过！\n");
 } finally {
   fs.rmSync(tempDir, { recursive: true, force: true });
 }

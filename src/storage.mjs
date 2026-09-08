@@ -15,7 +15,17 @@ try {
 }
 
 // 磁盘任务原始数据缓存：fileName -> { mtimeMs, job }，避免独立看板每秒全量反序列化导致内存引用丢失
+const MAX_DISK_JOBS_CACHE = 500;
 const diskJobsCache = new Map();
+
+function pruneDiskCache() {
+  if (diskJobsCache.size >= MAX_DISK_JOBS_CACHE) {
+    const oldestKey = diskJobsCache.keys().next().value;
+    if (oldestKey !== undefined) {
+      diskJobsCache.delete(oldestKey);
+    }
+  }
+}
 
 /**
  * 从磁盘读取所有持久化任务，利用文件 mtime 缓存复用已有对象
@@ -32,12 +42,16 @@ export function loadPersistedJobsRaw() {
         const stats = fs.statSync(fullPath);
         const cached = diskJobsCache.get(file);
         if (cached && cached.mtimeMs === stats.mtimeMs) {
+          // 真 LRU 机制：命中时刷新到末尾
+          diskJobsCache.delete(file);
+          diskJobsCache.set(file, cached);
           jobs.set(cached.job.jobId, cached.job);
           continue;
         }
         const text = fs.readFileSync(fullPath, "utf8");
         const data = JSON.parse(text);
         if (data && data.jobId) {
+          pruneDiskCache();
           diskJobsCache.set(file, { mtimeMs: stats.mtimeMs, job: data });
           jobs.set(data.jobId, data);
         }

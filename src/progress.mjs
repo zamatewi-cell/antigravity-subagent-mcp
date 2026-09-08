@@ -242,7 +242,7 @@ export function evaluateSubagentStatus(childParsed, killedConversationIds, paren
   return "running";
 }
 
-// 缓存容量上限与淘汰工具
+// 缓存容量上限与真 LRU 淘汰工具
 const MAX_CACHE_ENTRIES = 200;
 function pruneCache(cacheMap) {
   if (cacheMap.size >= MAX_CACHE_ENTRIES) {
@@ -253,25 +253,19 @@ function pruneCache(cacheMap) {
   }
 }
 
-// 文件级别 transcript 解析结果缓存：transcriptPath -> { mtimeMs, size, parsed }
+// 单文件级别 transcript 语法解析结果缓存：transcriptPath -> { mtimeMs, size, parsed }
 const transcriptCache = new Map();
 // 任务级别 log 解析结果缓存：logFile -> { mtimeMs, size, result }
 const logFallbackCache = new Map();
 
 /**
- * 递归解析 transcript 文件，提取实时运行状态与全员子代理微观工作明细
- * 引入 mtimeMs / size 缓存机制，避免每秒广播对海量日志文件全量同步读取造成的性能卡顿
- * @param {string} transcriptPath - transcript 文件绝对路径
- * @param {number} depth - 当前递归层级（防止无限嵌套）
- * @param {number} maxDepth - 最大递归深度（默认支持8级深度）
- * @param {Set<string>} visited - 已遍历文件集合
- * @param {string} parentState - 父任务生命周期状态
- * @returns {object|null} - 结构化状态
+ * 解析单个 transcript 文件本身的静态语法结构（带 mtime/size 缓存与真 LRU 淘汰）
+ * 仅解析：步数、当前动作、工具调用、创建的子代理引用以及 kill 声明，绝不递归外部子文件
+ * @param {string} transcriptPath - 文件路径
+ * @returns {object|null}
  */
-export function parseTranscript(transcriptPath, depth = 0, maxDepth = 8, visited = new Set(), parentState = "running") {
+export function parseLocalTranscript(transcriptPath) {
   if (!transcriptPath || !fs.existsSync(transcriptPath)) return null;
-  if (visited.has(transcriptPath)) return null;
-  visited.add(transcriptPath);
 
   let stats = null;
   try {
@@ -282,6 +276,9 @@ export function parseTranscript(transcriptPath, depth = 0, maxDepth = 8, visited
 
   const cached = transcriptCache.get(transcriptPath);
   if (cached && cached.mtimeMs === stats.mtimeMs && cached.size === stats.size) {
+    // 真 LRU 机制：命中时移至末尾
+    transcriptCache.delete(transcriptPath);
+    transcriptCache.set(transcriptPath, cached);
     return cached.parsed;
   }
 
@@ -343,7 +340,6 @@ export function parseTranscript(transcriptPath, depth = 0, maxDepth = 8, visited
                   role: sub.Role || sub.role || sub.TypeName || sub.type || "Subagent",
                   type: sub.TypeName || sub.type || "unknown",
                   conversation_id: null,
-                  status: "running",
                 };
                 pendingSubagents.push(item);
                 directSubagents.push(item);
@@ -392,71 +388,109 @@ export function parseTranscript(transcriptPath, depth = 0, maxDepth = 8, visited
       }
     }
 
-    // 递归聚合各级子代理的真实微观工作明细
-    const allDiscoveredSubagents = [];
-    for (const sub of directSubagents) {
-      const subInfo = {
-        role: sub.role,
-        type: sub.type,
-        conversation_id: sub.conversation_id,
-        status: sub.status,
-        step: 0,
-        current_action: "等待调度中...",
-        last_tool: null,
-        recent_activities: [],
-      };
-
-      if (sub.conversation_id && depth < maxDepth) {
-        const subTranscriptPath = locateTranscriptPath(sub.conversation_id);
-        if (subTranscriptPath) {
-          const childParsed = parseTranscript(subTranscriptPath, depth + 1, maxDepth, visited, parentState);
-          if (childParsed) {
-            childParsed.conversation_id = sub.conversation_id;
-            subInfo.step = childParsed.currentStep;
-            subInfo.current_action = childParsed.currentAction;
-            subInfo.last_tool = childParsed.lastTool;
-            subInfo.status = evaluateSubagentStatus(childParsed, killedConversationIds, parentState);
-            subInfo.recent_activities = childParsed.recentActivities.slice(-100);
-
-            // 递归汇总更深层子代理（孙代等），扁平展示给调用方
-            if (childParsed.subagents && childParsed.subagents.length > 0) {
-              for (const descendant of childParsed.subagents) {
-                allDiscoveredSubagents.push(descendant);
-              }
-            }
-          }
-        }
-      } else if (sub.conversation_id) {
-        subInfo.current_action = "运行中（深度超出最大解析层级）";
-      }
-
-      allDiscoveredSubagents.push(subInfo);
-    }
-
-    const maxSubStep = allDiscoveredSubagents.reduce((m, s) => Math.max(m, s.step || 0), 0);
-    const aggregatedStep = Math.max(currentStep, maxSubStep);
-
-    const result = {
-      currentStep: aggregatedStep,
+    const localResult = {
+      currentStep,
       currentAction,
       lastTool,
       lastEntry,
       lastPlannerEntry,
-      subagents: allDiscoveredSubagents,
-      recentActivities: recentActivities.slice(-100),
+      directSubagents,
+      recentActivities,
+      killedConversationIds,
     };
+
     if (stats) {
       pruneCache(transcriptCache);
       transcriptCache.set(transcriptPath, {
         mtimeMs: stats.mtimeMs,
         size: stats.size,
-        parsed: result,
+        parsed: localResult,
       });
     }
-    return result;
+
+    return localResult;
   } catch {
     return null;
   }
+}
+
+/**
+ * 递归组装 Agent Tree，提取实时运行状态与全员子代理微观工作明细
+ * 架构解耦：底层复用 parseLocalTranscript 的单文件缓存，上层动态组装并裁决子代理状态，
+ * 绝不把整棵子代理动态树缓存死，根除“子代理步数被父缓存冻结”与“父状态变化子不收敛”两大缺陷
+ * @param {string} transcriptPath - transcript 文件绝对路径
+ * @param {number} depth - 当前递归层级（防止无限嵌套）
+ * @param {number} maxDepth - 最大递归深度（默认支持8级深度）
+ * @param {Set<string>} visited - 已遍历文件集合
+ * @param {string} parentState - 父任务生命周期状态
+ * @returns {object|null} - 动态聚合的结构化状态
+ */
+export function parseTranscript(transcriptPath, depth = 0, maxDepth = 8, visited = new Set(), parentState = "running") {
+  if (!transcriptPath || !fs.existsSync(transcriptPath)) return null;
+  if (visited.has(transcriptPath)) return null;
+  visited.add(transcriptPath);
+
+  const local = parseLocalTranscript(transcriptPath);
+  if (!local) return null;
+
+  // 递归聚合各级子代理的真实微观工作明细（每次依据最新的子代理文件和 parentState 动态计算）
+  const allDiscoveredSubagents = [];
+  for (const sub of local.directSubagents) {
+    const subInfo = {
+      role: sub.role,
+      type: sub.type,
+      conversation_id: sub.conversation_id,
+      status: "running",
+      step: 0,
+      current_action: "等待调度中...",
+      last_tool: null,
+      recent_activities: [],
+    };
+
+    if (local.killedConversationIds && sub.conversation_id && local.killedConversationIds.has(sub.conversation_id)) {
+      subInfo.status = "killed";
+      subInfo.current_action = "已被父任务显式终止 (killed)";
+    }
+
+    if (sub.conversation_id && depth < maxDepth) {
+      const subTranscriptPath = locateTranscriptPath(sub.conversation_id);
+      if (subTranscriptPath) {
+        const childParsed = parseTranscript(subTranscriptPath, depth + 1, maxDepth, visited, parentState);
+        if (childParsed) {
+          childParsed.conversation_id = sub.conversation_id;
+          subInfo.step = childParsed.currentStep;
+          subInfo.current_action = childParsed.currentAction;
+          subInfo.last_tool = childParsed.lastTool;
+          subInfo.status = evaluateSubagentStatus(childParsed, local.killedConversationIds, parentState);
+          subInfo.recent_activities = childParsed.recentActivities.slice(-100);
+
+          // 递归汇总更深层子代理（孙代等），扁平展示给调用方
+          if (childParsed.subagents && childParsed.subagents.length > 0) {
+            for (const descendant of childParsed.subagents) {
+              allDiscoveredSubagents.push(descendant);
+            }
+          }
+        }
+      }
+    } else if (sub.conversation_id) {
+      subInfo.current_action = "运行中（深度超出最大解析层级）";
+    }
+
+    allDiscoveredSubagents.push(subInfo);
+  }
+
+  const maxSubStep = allDiscoveredSubagents.reduce((m, s) => Math.max(m, s.step || 0), 0);
+  const aggregatedStep = Math.max(local.currentStep, maxSubStep);
+
+  return {
+    currentStep: aggregatedStep,
+    currentAction: local.currentAction,
+    lastTool: local.lastTool,
+    lastEntry: local.lastEntry,
+    lastPlannerEntry: local.lastPlannerEntry,
+    subagents: allDiscoveredSubagents,
+    recentActivities: local.recentActivities.slice(-100),
+  };
 }
 
 /**
@@ -472,6 +506,8 @@ export function fallbackFromLog(logFile) {
     const stats = fs.statSync(logFile);
     const cached = logFallbackCache.get(logFile);
     if (cached && cached.mtimeMs === stats.mtimeMs && cached.size === stats.size) {
+      logFallbackCache.delete(logFile);
+      logFallbackCache.set(logFile, cached);
       return cached.result;
     }
 

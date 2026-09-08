@@ -14,7 +14,7 @@ const WEB_ROOT = path.resolve(__dirname, "web");
 const HTML_FILE = path.join(WEB_ROOT, "index.html");
 
 const DEFAULT_PORT = Number(process.env.ANTIGRAVITY_DASHBOARD_PORT) || 3721;
-const DASHBOARD_VERSION = "1.3.2";
+const DASHBOARD_VERSION = "1.3.3";
 
 // 物理日志读取尾部内存缓存：logFile -> { mtimeMs, size, tail }，避免每秒重复打开同步读取
 const logTailCache = new Map();
@@ -45,6 +45,8 @@ export function formatJobDetail(job) {
       const stats = fs.statSync(logFile);
       const cached = logTailCache.get(logFile);
       if (cached && cached.mtimeMs === stats.mtimeMs && cached.size === stats.size) {
+        logTailCache.delete(logFile);
+        logTailCache.set(logFile, cached);
         logTail = cached.tail;
       } else {
         const readBytes = Math.min(stats.size, 16 * 1024);

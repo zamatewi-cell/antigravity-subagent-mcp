@@ -1,7 +1,7 @@
-# 1.3.2 验证记录与工程硬化交付报告
+# 1.3.3 验证记录与工程硬化交付报告
 
 验证日期：2026-09-08  
-服务版本：`v1.3.2`  
+服务版本：`v1.3.3`  
 默认模型：`gemini-3.8-flash-high`
 
 ---
@@ -19,7 +19,8 @@
 | **v1.2.2** | 彻底根治完成误判（多工具扫描、否定词与进行时过滤、严禁孤立关键词判断），支持排队任务取消与重启收敛。 | `test/counterexamples.test.mjs` (Test 1~3, 8~12) |
 | **v1.3.0** | 独立暗黑极客风 Web 可视化监控看板（HTTP/SSE）、主编排器与子代理矩阵上帝视角、统一生命周期取消控制器（`cancelJob`）。 | `test/dashboard.test.mjs`, `test/cancel-consistency.test.mjs` |
 | **v1.3.1** | **系统性工程硬化**：根治“已完成误显运行中”与 Killed 状态反转；拦截独立看板假取消（HTTP 409 防篡改）；根除 DOM XSS 漏洞；收紧 CORS 与日志脱敏；首发终止原因胜出保护；基于 mtime/size 的 transcript 高性能缓存。 | `npm run test:all` (16 项反例 + 7 项看板 + 5 项取消一致性 + 生命周期测试) |
-| **v1.3.2** | **状态机与安全终极闭环**：<br>1. 独立看板只读化，拦截包括 `queued/retrying` 在内的全生命周期假取消（HTTP 409 `STANDALONE_CANCEL_FORBIDDEN`）；<br>2. 子代理状态机彻底纠偏，`killed` 绝对胜出，严禁在父任务 `success` 时洗绿漂移，父任务非成功异常终态穿透收敛；<br>3. 服务端增加 Host 头防 DNS Rebinding，跨域非本地 Origin 的 POST 强行阻断返回 HTTP 403 Forbidden；<br>4. `fallbackFromLog` 与 `transcriptCache` 引入基于 `mtime/size` 缓存与 LRU 淘汰上限（200 条）；<br>5. 独立看板消除硬编码磁盘路径，统一走 `storage.mjs` 的环境变量路径与缓存；<br>6. 真实生产 `withDirectoryLock` 导出并在单元测试中直接排他性验证。 | `test/cancel-consistency.test.mjs` (Test 4.1), `test/counterexamples.test.mjs` (Test 7, 14), `test/dashboard.test.mjs` (Test 3.2), `npm run test:all` |
+| **v1.3.2** | **状态机与安全终极闭环**：独立看板全状态只读拦截（HTTP 409）；子代理状态机优先级纠偏（killed 绝不漂移，删除二次洗绿）；Host 头与非本地 Origin POST 403 阻断；数据目录统一；真实生产目录锁导出验证。 | `test/cancel-consistency.test.mjs` (Test 4.1), `test/counterexamples.test.mjs` (Test 7, 14), `test/dashboard.test.mjs` (Test 3.2) |
+| **v1.3.3** | **1.3.x 终极封板与架构解耦**：<br>1. **两层解析架构彻底根治子代理状态冻结**：底层 `parseLocalTranscript` 带 mtime/size 缓存单文件语法，上层 `parseTranscript` 动态递归拼装 Agent Tree，子代理更新即时穿透，父任务取消子代理即时收敛；<br>2. **抽离独立目录锁模块 `src/directory-lock.mjs`**：解耦 `server.mjs` 启动副作用，测试完全沙箱隔离；<br>3. **实现真 LRU 机制与 `diskJobsCache` 500 条上限保护**；<br>4. **配置 GitHub Actions CI 自动化流水线 (`.github/workflows/ci.yml`)**，建立多平台独立 Commit Status Checks。 | `test/counterexamples.test.mjs` (Test 16~18), `npm run test:offline` (全部 6 套离线套件 100% 通过) |
 
 ---
 

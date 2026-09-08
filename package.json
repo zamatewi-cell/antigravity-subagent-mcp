@@ -1,6 +1,6 @@
 {
   "name": "codex-antigravity-subagent-mcp",
-  "version": "1.3.2",
+  "version": "1.3.3",
   "private": true,
   "type": "module",
   "description": "Local MCP bridge that lets Codex delegate work to Google Antigravity CLI.",
@@ -30,7 +30,8 @@
     "test:teamwork-full": "node test/full-teamwork-readonly.mjs",
     "test:lifecycle": "node test/lifecycle.test.mjs",
     "test:cancel": "node test/cancel-consistency.test.mjs",
-    "test:all": "node test/smoke.mjs && node test/counterexamples.test.mjs && node test/dashboard.test.mjs && node test/cancel-consistency.test.mjs && node test/lifecycle.test.mjs",
+    "test:offline": "node test/counterexamples.test.mjs && node test/dashboard.test.mjs && node test/cancel-consistency.test.mjs && node test/lifecycle.test.mjs && node test/progress.test.mjs && node test/diagnostics.test.mjs",
+    "test:all": "node test/smoke.mjs && npm run test:offline",
     "test:live": "node test/live-validation.mjs"
   },
   "dependencies": {
