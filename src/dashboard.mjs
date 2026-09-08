@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { exec } from "node:child_process";
 import { restorePersistedJobs, persistJob } from "./storage.mjs";
 import { getTaskProgress } from "./progress.mjs";
+import { cancelJob } from "./process-control.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -133,7 +134,7 @@ export function startDashboardServer(options = {}) {
     return diskJobs.get(id) || null;
   }
 
-  const server = http.createServer((req, res) => {
+  const server = http.createServer(async (req, res) => {
     // 跨域支持与预检
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -211,21 +212,7 @@ export function startDashboardServer(options = {}) {
         return;
       }
 
-      job.cancelRequested = true;
-      if (job.state === "queued" || job.state === "retrying") {
-        job.state = "cancelled";
-        job.completedAt = new Date().toISOString();
-        persistJob(job);
-      } else if (job.state === "running") {
-        job.state = "cancelled";
-        job.completedAt = new Date().toISOString();
-        if (job.child && !job.child.killed) {
-          try {
-            job.child.kill("SIGTERM");
-          } catch {}
-        }
-        persistJob(job);
-      }
+      await cancelJob(job);
 
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({ status: "SUCCESS", message: `任务 ${jobId} 已请求取消`, job: formatJobDetail(job) }));

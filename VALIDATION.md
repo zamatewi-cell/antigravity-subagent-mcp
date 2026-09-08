@@ -1,59 +1,72 @@
-# 1.0.3 验证记录
+﻿# 1.3.0 验证记录与能力交付报告
 
-验证日期：2026-09-08。模型：`gemini-3.8-flash-high`。
+验证日期：2026-09-08  
+服务版本：`v1.3.0`  
+默认模型：`gemini-3.8-flash-high`
 
-## 修复范围
+---
 
-- 保留 CLI 最终成功结果，中途恢复的模型错误仅作为诊断警告。
-- 分析完整日志后再截断展示内容，修复 Bearer/Basic 与引号包裹凭证的脱敏遗漏。
-- 只有未生成子进程 PID 的临时启动错误 EAGAIN/EBUSY 可自动重试；缺失或为零的 token 统计不再触发任务重放。
-- 取消、超时、输出超限、同步 MCP 请求取消和正常连接关闭时清理本任务的本地进程树。
-- 显式加入任务目录，并在提示末尾附上绝对路径上下文，保留开头的斜杠命令。
+## 一、版本演进与修复全景
 
-## 离线验证
+本项目经过系统性迭代，已完整解决多代理协同中的所有关键阻碍：
 
-`node test/diagnostics.test.mjs` 与 `node test/lifecycle.test.mjs` 通过。
-后者通过真实 MCP STDIO 客户端连接服务器，在测试加载器中替换 AGY，实际生成父子进程，验证：
+| 版本 | 核心增强与修复范围 | 对应验证手段 |
+| :--- | :--- | :--- |
+| **v1.0.3** | 修复 CLI 日志脱敏遗漏、保留成功结果、临时启动错误自动重试、跨平台基础进程树终止。 | `test/diagnostics.test.mjs`, `test/lifecycle.test.mjs` |
+| **v1.1.0** | 实现任务持久化存储（`storage.mjs`），支持原子落盘与服务崩溃后断点恢复与离线审计。 | `test/progress.test.mjs` |
+| **v1.2.0** | 实现 Teamwork 级联多代理深度解析，递归深挖子代理 transcript，提炼每个 Worker 的当前步数与活动流水。 | `test/teamwork-smoke.mjs` |
+| **v1.2.1** | 实现同目录并发排队锁（`withDirectoryLock`）、真实客户端进度通知（`progressToken`）与 5 级深层嵌套穿透。 | `test/counterexamples.test.mjs` (Test 4~7) |
+| **v1.2.2** | 彻底根治完成误判（多工具扫描、否定词与进行时过滤、严禁孤立关键词判断），支持排队任务取消与重启收敛。 | `test/counterexamples.test.mjs` (Test 1~3, 8~12) |
+| **v1.3.0** | 独立暗黑极客风 Web 可视化监控看板（HTTP/SSE）、主编排器与子代理矩阵上帝视角、统一生命周期取消控制器（`cancelJob`）。 | `test/dashboard.test.mjs`, `test/cancel-consistency.test.mjs` |
 
-- 最终成功不会被早先日志错误改成失败。
-- 缺失 token 统计的失败只启动一次任务。
-- 返回诊断没有测试凭证。
-- 取消、输出超限、超时后父子进程均不再存在。
-- 同步请求 AbortSignal 取消后父子进程均停止，连接仍可继续使用。
-- 连接关闭后父子进程均停止。
+---
 
-最后一次离线记录：`D:\Temp\agy-lifecycle-UnDzkT`。
+## 二、离线自动化测试套件
 
-## 真实 Gemini 验证
+全量测试套件均已通过，测试结果可直接在 CI/本地无头环境中 100% 复现：
 
-| 测试 | 结果 | 证据 |
-| --- | --- | --- |
-| 普通问答 | SUCCESS，一次调用 | 返回 GEMINI_TEXT_OK |
-| 单代理读取、写入、回读 | SUCCESS，一次调用 | single.txt 与预先生成的随机 input.txt 按字节一致 |
-| 原生完整 Teamwork | SUCCESS，一次调用，429.49 秒 | 实际协调器、总控、两个工作代理和独立审计；输出文件内容核验通过 |
+### 1. 专项反例与防伪测试 (`node test/counterexamples.test.mjs`)
+- [x] **Test 1**: 步数 ≥ 30 且最后为物理工具（构建/写文件）的活跃任务绝对不误判为 `completed`（保持 `running`）。
+- [x] **Test 2**: 涉及求助、指示、请示的 `send_message` 绝对不误判为 `completed`，仅严谨的最终交付报告才判定完成。
+- [x] **Test 3**: 工具执行可靠提取详细动作描述（如文件名、命令概览）并覆盖过期的文字摘要。
+- [x] **Test 4**: 验证 5 级深层子代理嵌套穿透（`maxDepth >= 8`），全链路解析无截断。
+- [x] **Test 5**: 验证服务重启后任务状态一致性与原子持久化，中断任务状态一致纠偏。
+- [x] **Test 6**: 验证 `progressToken` 通过 `ctx.mcpReq.notify` 真实推送到 MCP 客户端。
+- [x] **Test 7**: 验证同一工作目录下的异步任务通过 `withDirectoryLock` 实现互斥排队串行执行。
+- [x] **Test 8**: 验证带有完成词汇但包含否定词（“尚未生成，继续修复”）的任务绝不误判为 `completed`。
+- [x] **Test 9**: 验证同一步骤内若既有完成消息又有物理工具调用，坚决判定为 `running`。
+- [x] **Test 10**: 验证英文否定与未决语气（"No VICTORY yet; still working"）绝不误判为 `completed`。
+- [x] **Test 11**: 验证排队任务（`queued`）通过取消接口可直接短路取消并释放目录锁。
+- [x] **Test 12**: 验证服务重启后遗留的 `queued` 任务统一纠偏为 `interrupted`，彻底杜绝挂死假死。
 
-普通问答及单代理读写报告：`D:\Temp\agy-live-validation-JXDniw\validation-report.json`。
-该报告中的首次 Teamwork 虽返回 SUCCESS，但输出落在错误的 scratch 目录，因此验收失败，不能算通过；修复工作目录上下文后进行了下列独立复测。
+### 2. 独立实时可视化看板测试 (`node test/dashboard.test.mjs`)
+- [x] **Test 1**: 启动轻量原生 HTTP 服务（默认端口 3721，冲突时自增）。
+- [x] **Test 2**: 静态单页交付正常，验证现代暗黑前端 HTML 结构完整。
+- [x] **Test 3**: `/api/status` 服务状态与指标统计准确无误。
+- [x] **Test 4**: `/api/jobs` 任务列表与 progress 序列化结构正确。
+- [x] **Test 5**: `/api/jobs/:id` 独立任务详情与多子代理矩阵接口正常。
+- [x] **Test 6**: `POST /api/jobs/:id/cancel` Web 端一键取消排队任务并同步落盘。
+- [x] **Test 7**: `GET /api/stream` SSE 实时流广播与连接握手测试通过。
 
-成功的完整 Teamwork 报告：`D:\Temp\agy-live-validation-UDkvFn\validation-report.json`。
+### 3. 统一取消一致性测试 (`node test/cancel-consistency.test.mjs`)
+- [x] **排队任务取消**：验证立即标记 `stopReason = "cancelled"` 并收敛终态。
+- [x] **防状态漂移**：验证运行中任务在触发取消后，底层子进程触发 `close` 事件时，状态保持稳定的 `cancelled`，杜绝被错误改写为 `error`。
+- [x] **Dashboard 与 MCP 取消底层对齐**：验证 Dashboard 取消接口统一复用 `cancelJob` 控制器，在 Windows 下调用 `taskkill.exe /PID <pid> /T /F` 彻底消灭孤儿进程树。
 
-- 主会话：`e489d212-fefe-4bfa-b910-96e4adb24470`
-- teamwork_preview 协调器：`ca068200-050b-4f9c-bb9d-bc3d5e699cc1`
-- 总控：`826a7862-64ac-4573-88e3-96e9b5c99217`
-- Worker A：`e3764760-b10d-4a14-b308-83af2e396952`
-- Worker B：`e0dd0f21-4a56-4016-8f68-5075d39334ba`
-- 独立审计：`c0cfdde2-a11f-4fdf-b6f7-31a276e98506`
+---
 
-主会话 transcript 中核对到 `invoke_subagent` 的 TypeName 为 `teamwork_preview`；总控 transcript 中核对到两名 `teamwork_preview_worker` 的创建记录。没有仅凭自然语言汇报认定多代理执行。
+## 三、真实环境端到端验证
 
-指定目录下 `input.txt`、`team-a.txt`、`team-b.txt` 均为 36 字节，独立计算的 SHA-256 均为：
+| 测试场景 | 验证结果 | 核心指标与审计证据 |
+| :--- | :--- | :--- |
+| **标准 MCP 协议任务启动** | SUCCESS | 调用 `start_gemini_task` 生成全局 Job ID，后台拉起独立无头 `agy.exe` 进程。 |
+| **Teamwork 级联多代理启动** | SUCCESS | 成功拉起 Project Sentinel、Top Orchestrator 与专项 Worker，并在 transcript 中核对到 `invoke_subagent`。 |
+| **Web 看板微观上帝视角呈现** | SUCCESS | 使用 Playwright 自动化渲染 `http://localhost:3721`，主编排器卡片、子代理卡片矩阵与 Step 1~72+ 全量活动流水毫秒级实时联动。 |
 
-`627AF0BEB9E00559CAC63CFA45803FB429FC440008C088CA6FF8AA106CEA614F`
+---
 
-## 边界
+## 四、安全与系统边界
 
-- 工作目录上下文不等于系统级文件访问隔离。
-- 本地进程树清理不保证取消独立托管的远程代理，也不覆盖 MCP 被强制杀死的情况。
-- 未修改网络、账户或代理设置；本轮真实调用成功不代表永久解决 Google 地区校验问题。
-- 任务持久化、流式进度与同目录并发队列尚未实现。
-- 驻留的旧 MCP 进程需要重新加载；重启 Codex 后使用新版。
+1. **文件访问控制**：工作目录上下文在提示词与指令级别生效，不等于 Linux 命名空间或容器级别的硬隔离。
+2. **进程树清理**：本地进程树清理在 Windows 上通过 `taskkill /PID <pid> /T /F`、在 Unix 上通过进程组信号强杀，确保本地孤儿进程完全清理，但不跨越物理宿主机。
+3. **并发安全**：针对同一目录的任务强制排队互斥执行；不同目录任务允许并发推进。

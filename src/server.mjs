@@ -7,7 +7,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import * as z from "zod/v4";
 import { enrichAgyResult, sanitizeDiagnostics } from "./diagnostics.mjs";
-import { stopProcessTree, isRetryablePreflightFailure } from "./process-control.mjs";
+import { stopProcessTree, stopJob, cancelJob, isRetryablePreflightFailure } from "./process-control.mjs";
 import { getTaskProgress } from "./progress.mjs";
 import { persistJob, restorePersistedJobs } from "./storage.mjs";
 import { startDashboardServer, openInBrowser } from "./dashboard.mjs";
@@ -267,21 +267,6 @@ function launchAgy(input, jobId = randomUUID()) {
   }, (invocation.timeoutSeconds + 5) * 1000);
 
   return job;
-}
-
-function stopJob(job, reason) {
-  if (job.stopPromise) return job.stopPromise;
-  job.stopReason = reason;
-  job.state = "stopping";
-  if (reason === "cancelled") job.cancelRequested = true;
-  if (job.timeoutHandle) clearTimeout(job.timeoutHandle);
-  job.stopPromise = stopProcessTree(job.child).catch((error) => {
-    job.terminationError = sanitizeDiagnostics(error.message);
-    job.state = "error";
-    job.result = { status: "ERROR", error: job.terminationError,
-      error_details: { layer: "mcp_bridge", code: "PROCESS_TREE_TERMINATION_FAILED" } };
-  });
-  return job.stopPromise;
 }
 
 const directoryQueueLocks = new Map();
@@ -565,20 +550,8 @@ server.registerTool(
   async ({ job_id }) => {
     const job = jobs.get(job_id);
     if (!job) return toolResponse({ status: "ERROR", error: `未找到任务：${job_id}` }, true);
-    if (job.state === "queued" || job.state === "retrying") {
-      job.cancelRequested = true;
-      job.state = "cancelled";
-      job.completedAt = new Date().toISOString();
-      persistJob(job);
-      return toolResponse(publicJob(job));
-    }
-    if (!["running", "stopping"].includes(job.state)) return toolResponse(publicJob(job), job.state === "error");
-    await stopJob(job, "cancelled");
-    persistJob(job);
-    if (job.terminationError) return toolResponse(publicJob(job), true);
-    await job.completion;
-    persistJob(job);
-    return toolResponse(publicJob(job));
+    await cancelJob(job);
+    return toolResponse(publicJob(job), job.state === "error");
   },
 );
 
@@ -663,12 +636,8 @@ function shutdownTasks() {
   if (shutdownPromise) return shutdownPromise;
   shutdownPromise = Promise.allSettled([
     ...[...jobs.values()].map(async (job) => {
-      job.cancelRequested = true;
-      if (job.state === "retrying") {
-        job.state = "cancelled";
-        job.completedAt = new Date().toISOString();
-      } else if (["running", "stopping"].includes(job.state)) {
-        await stopJob(job, "cancelled");
+      if (["running", "stopping", "queued", "retrying"].includes(job.state)) {
+        await cancelJob(job);
       }
     }),
     dashboardInstance ? dashboardInstance.close().catch(() => {}) : Promise.resolve(),
