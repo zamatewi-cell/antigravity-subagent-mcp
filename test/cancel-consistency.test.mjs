@@ -1,15 +1,22 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import http from "node:http";
 import { fileURLToPath } from "node:url";
 import { EventEmitter } from "node:events";
-import { cancelJob } from "../src/process-control.mjs";
-import { startDashboardServer } from "../src/dashboard.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-cancel-test-"));
+process.env.ANTIGRAVITY_MCP_DATA_DIR = path.join(tempDir, "data");
+
+const { cancelJob } = await import("../src/process-control.mjs");
+const { startDashboardServer } = await import("../src/dashboard.mjs");
+const { JOBS_DIR } = await import("../src/storage.mjs");
+assert(JOBS_DIR.startsWith(tempDir), `测试 JOBS_DIR 必须被严格隔离至临时沙箱目录: ${JOBS_DIR}`);
 
 async function runTests() {
+  try {
   console.log("--- 1. 测试排队任务统一取消 ---");
   const queuedJob = {
     jobId: "test-cancel-queued-" + Date.now(),
@@ -35,7 +42,6 @@ async function runTests() {
   mockChild.signalCode = null;
   mockChild.killed = false;
 
-  let taskkillInvoked = false;
   const runningJob = {
     jobId: "test-cancel-running-" + Date.now(),
     state: "running",
@@ -46,58 +52,55 @@ async function runTests() {
     result: null,
   };
 
-  // 模拟 server.mjs 中的 close 处理机制
   let closeHandlerCalled = false;
   runningJob.completion = new Promise((resolve) => {
     mockChild.once("close", (exitCode, signal) => {
       closeHandlerCalled = true;
       // 核心验证点：如果 stopReason 设置正确，绝不能走向 error！
-      if (runningJob.stopReason) {
-        const states = { cancelled: ["cancelled", "CANCELLED"] };
-        const [state, status] = states[runningJob.stopReason] || ["error", "ERROR"];
-        runningJob.state = state;
-        runningJob.result = { status, error: "任务已取消。" };
+      if (runningJob.stopReason === "cancelled" || runningJob.cancelRequested) {
+        runningJob.state = "cancelled";
+        runningJob.result = runningJob.result || { status: "CANCELLED" };
       } else {
-        // 若缺少 stopReason，便会产生向 error 的状态漂移
         runningJob.state = "error";
-        runningJob.result = { status: "ERROR", error: "非正常退出" };
+        runningJob.result = { status: "ERROR", error: "未预期的退出" };
       }
-      runningJob.completedAt = new Date().toISOString();
-      resolve(runningJob);
+      resolve(runningJob.result);
     });
   });
 
-  // 触发取消
+  // 执行 cancelJob
   const cancelPromise = cancelJob(runningJob);
   assert.equal(runningJob.stopReason, "cancelled", "cancelJob 必须第一时间标记 stopReason = cancelled");
+  assert.equal(runningJob.cancelRequested, true, "cancelJob 必须标记 cancelRequested = true");
 
   // 模拟底层子进程因为信号或 taskkill 产生 close 事件（退出码通常非0）
   setTimeout(() => {
     mockChild.emit("close", 1, "SIGTERM");
-  }, 100);
+  }, 50);
 
   await cancelPromise;
+  await runningJob.completion;
 
   assert.equal(closeHandlerCalled, true, "close handler 必须被调用");
   assert.equal(runningJob.state, "cancelled", "状态必须稳定为 cancelled，绝不能被 close handler 漂移为 error！");
   assert.equal(runningJob.result.status, "CANCELLED", "结果状态必须保持 CANCELLED");
-  console.log("✔ 运行中任务取消与防状态漂移测试通过");
+  console.log("✔ 运行中任务取消与 close 防漂移验证通过");
 
-  console.log("--- 3. 测试 Dashboard /api/jobs/:id/cancel 接口统一复用 cancelJob ---");
-  const memJobs = new Map();
-  const dashJob = {
-    jobId: "dash-cancel-job-" + Date.now(),
+  console.log("--- 3. 测试与 Dashboard 集成取消（内存任务统一调度） ---");
+  const dashMemoryJobs = new Map();
+  const testJobInDash = {
+    jobId: "dash-job-" + Date.now(),
     state: "queued",
     startedAt: new Date().toISOString(),
     completedAt: null,
-    invocation: { prompt: "dashboard cancel test", cwd: process.cwd() },
+    invocation: { prompt: "dash cancel integration", cwd: process.cwd() },
     result: null,
   };
-  memJobs.set(dashJob.jobId, dashJob);
+  dashMemoryJobs.set(testJobInDash.jobId, testJobInDash);
 
-  const dashInstance = await startDashboardServer({
-    port: 13725,
-    memoryJobs: memJobs,
+  const dashboardInstance = await startDashboardServer({
+    port: 13726,
+    memoryJobs: dashMemoryJobs,
     autoOpen: false,
   });
 
@@ -105,8 +108,8 @@ async function runTests() {
     const postRes = await new Promise((resolve, reject) => {
       const req = http.request({
         hostname: "localhost",
-        port: 13725,
-        path: `/api/jobs/${dashJob.jobId}/cancel`,
+        port: 13726,
+        path: `/api/jobs/${testJobInDash.jobId}/cancel`,
         method: "POST",
       }, (res) => {
         let body = "";
@@ -117,40 +120,42 @@ async function runTests() {
       req.end();
     });
 
-    assert.equal(postRes.statusCode, 200, "Dashboard 取消 API 必须返回 200");
-    assert.equal(dashJob.state, "cancelled", "通过 Dashboard 取消后状态必须为 cancelled");
-    assert.equal(dashJob.stopReason, "cancelled", "通过 Dashboard 取消后必须具备 stopReason = cancelled");
-    assert.equal(dashJob.result?.status, "CANCELLED", "通过 Dashboard 取消后结果必须为 CANCELLED");
-    console.log("✔ Dashboard 取消接口统一复用测试通过");
+    assert.equal(postRes.statusCode, 200, "取消应当成功返回 200");
+    assert.equal(postRes.body.status, "SUCCESS");
+    assert.equal(postRes.body.job.state, "cancelled");
+
+    const memJobAfter = dashMemoryJobs.get(testJobInDash.jobId);
+    assert.equal(memJobAfter.state, "cancelled");
+    assert.equal(memJobAfter.stopReason, "cancelled", "Dashboard 取消必须通过 cancelJob 正确记录 stopReason");
+    assert.equal(memJobAfter.cancelRequested, true);
+    console.log("✔ Dashboard 集成 cancelJob 验证通过");
   } finally {
-    await dashInstance.close();
+    await dashboardInstance.close();
   }
 
-  console.log("--- 4. 测试独立 Dashboard（无 child 句柄）拦截假取消 ---");
-  // 模拟 Standalone 模式：无 memoryJobs，磁盘中存在一个正在运行的任务
+  console.log("--- 4. 测试独立 Dashboard（无 memoryJobs）取消安全拦截与防伪造取消 ---");
+  const jobsDir = JOBS_DIR;
   const fakeStandaloneJob = {
-    jobId: "test-standalone-running-" + Date.now(),
+    jobId: "standalone-running-" + Date.now(),
     state: "running",
     startedAt: new Date().toISOString(),
     completedAt: null,
-    invocation: { prompt: "standalone fake cancel test", cwd: process.cwd() },
+    invocation: { prompt: "fake standalone", cwd: process.cwd() },
     result: null,
   };
-  const jobsDir = path.resolve(__dirname, "..", "data", "jobs");
-  fs.mkdirSync(jobsDir, { recursive: true });
-  fs.writeFileSync(path.join(jobsDir, `${fakeStandaloneJob.jobId}.json`), JSON.stringify(fakeStandaloneJob, null, 2), "utf8");
+  fs.writeFileSync(path.join(jobsDir, `${fakeStandaloneJob.jobId}.json`), JSON.stringify(fakeStandaloneJob));
 
-  // 启动一个没有 memoryJobs 注入的独立看板服务实例
   const standaloneInstance = await startDashboardServer({
-    port: 13726,
+    port: 13727,
+    memoryJobs: null, // 独立看板模式
     autoOpen: false,
   });
 
   try {
-    const postStandaloneRes = await new Promise((resolve, reject) => {
+    const postRes = await new Promise((resolve, reject) => {
       const req = http.request({
         hostname: "localhost",
-        port: 13726,
+        port: 13727,
         path: `/api/jobs/${fakeStandaloneJob.jobId}/cancel`,
         method: "POST",
       }, (res) => {
@@ -162,31 +167,31 @@ async function runTests() {
       req.end();
     });
 
-    assert.equal(postStandaloneRes.statusCode, 409, "独立看板无 child 句柄取消运行中任务必须返回 409 Conflict！");
-    assert.equal(postStandaloneRes.body.code, "STANDALONE_CANCEL_FORBIDDEN", "错误码必须为 STANDALONE_CANCEL_FORBIDDEN");
+    assert.equal(postRes.statusCode, 409, "独立看板必须返回 409 Conflict（纯只读）！");
+    assert.equal(postRes.body.code, "STANDALONE_CANCEL_FORBIDDEN");
 
-    // 检查磁盘 JSON 是否被破坏
-    const diskContentAfter = JSON.parse(fs.readFileSync(path.join(jobsDir, `${fakeStandaloneJob.jobId}.json`), "utf8"));
-    assert.equal(diskContentAfter.state, "running", "独立看板拒绝取消后，磁盘任务状态绝不能被假改为 cancelled！");
-    console.log("✔ 独立看板假取消拦截与防篡改验证通过（HTTP 409 + 磁盘状态保护）");
+    const diskJobAfter = JSON.parse(fs.readFileSync(path.join(jobsDir, `${fakeStandaloneJob.jobId}.json`), "utf8"));
+    assert.equal(diskJobAfter.state, "running", "独立看板绝不能改写磁盘为 cancelled！");
+    console.log("✔ 独立看板只读拦截与防伪造取消验证通过");
   } finally {
     await standaloneInstance.close();
     try { fs.unlinkSync(path.join(jobsDir, `${fakeStandaloneJob.jobId}.json`)); } catch {}
   }
 
-  console.log("--- 4.1 测试独立 Dashboard 拦截排队中任务（queued）的假取消 ---");
+  console.log("--- 4.1 测试独立 Dashboard 对 queued 任务同样严格拦截（杜绝跨进程假取消） ---");
   const fakeQueuedStandaloneJob = {
-    jobId: "test-standalone-queued-" + Date.now(),
+    jobId: "standalone-queued-" + Date.now(),
     state: "queued",
     startedAt: new Date().toISOString(),
     completedAt: null,
-    invocation: { prompt: "standalone queued fake cancel test", cwd: process.cwd() },
+    invocation: { prompt: "fake queued standalone", cwd: process.cwd() },
     result: null,
   };
-  fs.writeFileSync(path.join(jobsDir, `${fakeQueuedStandaloneJob.jobId}.json`), JSON.stringify(fakeQueuedStandaloneJob, null, 2), "utf8");
+  fs.writeFileSync(path.join(jobsDir, `${fakeQueuedStandaloneJob.jobId}.json`), JSON.stringify(fakeQueuedStandaloneJob));
 
   const standaloneQueuedInstance = await startDashboardServer({
     port: 13727,
+    memoryJobs: null, // 独立看板模式
     autoOpen: false,
   });
 
@@ -244,6 +249,9 @@ async function runTests() {
   console.log("✔ 首发终止原因胜出保护测试通过");
 
   console.log("\n 全部统一取消与生命周期防漂移测试 100% 通过！");
+  } finally {
+    try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
+  }
 }
 
 runTests().catch((err) => {

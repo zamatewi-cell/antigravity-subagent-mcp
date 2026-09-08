@@ -3,10 +3,13 @@ import http from "node:http";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { startDashboardServer, formatJobDetail } from "../src/dashboard.mjs";
-import { persistJob } from "../src/storage.mjs";
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-dash-test-"));
+process.env.ANTIGRAVITY_MCP_DATA_DIR = path.join(tempDir, "data");
+
+const { startDashboardServer, formatJobDetail } = await import("../src/dashboard.mjs");
+const { JOBS_DIR } = await import("../src/storage.mjs");
+assert(JOBS_DIR.startsWith(tempDir), `测试 JOBS_DIR 必须被严格隔离至临时沙箱目录: ${JOBS_DIR}`);
 
 function httpGet(url) {
   return new Promise((resolve, reject) => {

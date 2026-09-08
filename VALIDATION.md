@@ -44,7 +44,10 @@
 - [x] **Test 13**: 验证真实子代理汇报（包含“已完成 codebase 探索”、“已成功交付并修复了编译告警”）能准确判定为 `completed`，绝不因历史复盘词误伤。
 - [x] **Test 14**: 验证被明确终止的子代理裁决为 `killed`，彻底修复逻辑反转误标为 completed 的问题。
 - [x] **Test 15**: 验证重启纠偏后的 `interrupted` 状态成功原子同步落盘，消除磁盘脏数据。
-- [x] **Test 16**: 验证基于文件 `mtime` 和 `size` 的 transcript 解析结果缓存机制，大幅削减每秒广播的重复 I/O。
+- [x] **Test 16**: 验证基于文件 `mtime` 和 `size` 的 transcript 底层解析结果缓存与真 LRU 机制，大幅削减每秒广播的重复 I/O。
+- [x] **Test 17**: 验证父 transcript 缓存不冻结子代理的实时步数与动作（根治缓存回归，动态穿透）。
+- [x] **Test 18**: 验证父任务取消时子代理状态收敛穿透缓存。
+- [x] **测试沙箱严格隔离**: 测试均基于 `mkdtempSync` 创建沙箱并动态 `await import` 注入 `process.env.ANTIGRAVITY_MCP_DATA_DIR`，内置 `assert(JOBS_DIR.startsWith(tempDir))` 防御性断言，杜绝 ESM 静态 import 提升导致的生产目录污染。
 
 ### 2. 独立实时可视化看板测试 (`node test/dashboard.test.mjs`)
 - [x] **Test 1**: 启动轻量原生 HTTP 服务（默认端口 3721，冲突时自增）。

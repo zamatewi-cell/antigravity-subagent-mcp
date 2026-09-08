@@ -6,13 +6,15 @@ import { fileURLToPath } from "node:url";
 import { McpServer, InMemoryTransport } from "@modelcontextprotocol/server";
 import { Client } from "@modelcontextprotocol/client";
 import * as z from "zod/v4";
-import { parseTranscript, parseLocalTranscript, evaluateSubagentStatus, formatToolAction, getTaskProgress } from "../src/progress.mjs";
-import { persistJob, restorePersistedJobs } from "../src/storage.mjs";
-import { withDirectoryLock } from "../src/directory-lock.mjs";
-
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-counterexamples-"));
-process.env.ANTIGRAVITY_MCP_DATA_DIR = path.join(tempDir, "data", "jobs");
+process.env.ANTIGRAVITY_MCP_DATA_DIR = path.join(tempDir, "data");
+
+const { parseTranscript, parseLocalTranscript, evaluateSubagentStatus, formatToolAction, getTaskProgress } = await import("../src/progress.mjs");
+const { persistJob, restorePersistedJobs, JOBS_DIR } = await import("../src/storage.mjs");
+const { withDirectoryLock } = await import("../src/directory-lock.mjs");
+
+assert(JOBS_DIR.startsWith(tempDir), `测试 JOBS_DIR 必须被严格隔离至临时沙箱目录: ${JOBS_DIR}`);
 
 try {
   console.log("=== 开始执行专项反例测试套件 ===");
@@ -436,8 +438,8 @@ try {
 
   // 15. 反例 15：重启纠偏后的 interrupted 任务真实原子写回磁盘
   console.log("\n[Test 15] 验证重启纠偏后的任务原子持久化落盘（消除磁盘脏数据）...");
-  const diskPath = path.join(root, "data", "jobs", "queued-disk-test.json");
-  assert(fs.existsSync(diskPath), "任务持久化文件必须在磁盘存在");
+  const diskPath = path.join(JOBS_DIR, "queued-disk-test.json");
+  assert(fs.existsSync(diskPath), "任务持久化文件必须在沙箱磁盘存在");
   const onDiskJson = JSON.parse(fs.readFileSync(diskPath, "utf8"));
   assert.equal(onDiskJson.state, "interrupted", "磁盘上的持久化 JSON 必须同步纠偏为 interrupted！");
   assert.equal(onDiskJson.result?.error_details?.code, "SERVICE_RESTARTED", "磁盘上的错误码必须同步落盘！");

@@ -11,7 +11,12 @@ const temp = fs.mkdtempSync(path.join(os.tmpdir(), "agy-lifecycle-"));
 const transport = new StdioClientTransport({
   command: process.execPath,
   args: ["--import", pathToFileURL(path.join(root, "test/fixture-loader.mjs")).href, path.join(root, "src/server.mjs")],
-  env: { ...process.env, AGY_CLI_PATH: "offline-agy-fixture", ANTIGRAVITY_MCP_LOG_DIR: path.join(temp, "logs") },
+  env: {
+    ...process.env,
+    AGY_CLI_PATH: "offline-agy-fixture",
+    ANTIGRAVITY_MCP_LOG_DIR: path.join(temp, "logs"),
+    ANTIGRAVITY_MCP_DATA_DIR: path.join(temp, "data"),
+  },
   stderr: "inherit",
 });
 const client = new Client({ name: "offline-lifecycle", version: "1.0.0" });
