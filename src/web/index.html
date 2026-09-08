@@ -432,6 +432,49 @@
       font-family: var(--font-mono);
     }
 
+    /* 阶段产出与交付成果面板 */
+    .result-panel {
+      background-color: var(--bg-card);
+      border: 1px solid rgba(16, 185, 129, 0.35);
+      border-radius: 10px;
+      padding: 16px 18px;
+      margin-bottom: 20px;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+    }
+    .result-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+    .result-badge {
+      font-size: 11px;
+      font-weight: 700;
+      color: #34d399;
+      background: rgba(16, 185, 129, 0.15);
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      padding: 2px 8px;
+      border-radius: 12px;
+    }
+    .result-body {
+      background: #05080f;
+      border: 1px solid var(--border-subtle);
+      border-radius: 6px;
+      padding: 12px 14px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: #cbd5e1;
+      line-height: 1.6;
+      max-height: 280px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
     /* 微观活动流抽屉/面板 */
     .timeline-panel {
       background-color: var(--bg-card);
@@ -597,16 +640,28 @@
         <div class="content-area">
           <!-- 子代理视图 -->
           <div id="viewSubagents">
+            <!-- 阶段产出与交付成果面板 -->
+            <div class="result-panel" id="resultPanel" style="display: none;">
+              <div class="result-header">
+                <div style="font-size: 13px; font-weight: 700; color: #fff; display: flex; align-items: center; gap: 8px;">
+                  <span style="display:inline-block; width:8px; height:8px; background:#10b981; border-radius:50%;"></span>
+                  任务执行成果与阶段交付物
+                </div>
+                <span class="result-badge" id="resultBadge">已就绪</span>
+              </div>
+              <div class="result-body" id="resultContent"></div>
+            </div>
+
             <div class="section-title">
               <span style="display:inline-block; width:8px; height:8px; background:var(--cyan); border-radius:50%;"></span>
-              Teamwork 子代理微观上帝视角
+              Teamwork 协同架构与代理矩阵
             </div>
             <div class="subagent-grid" id="subagentGrid"></div>
 
-            <!-- 选中子代理的微观时间线 -->
-            <div class="timeline-panel" id="timelinePanel" style="display: none;">
+            <!-- 微观执行活动时间线 -->
+            <div class="timeline-panel" id="timelinePanel">
               <div class="timeline-header">
-                <div style="font-size: 13px; font-weight: 700; color: #fff;" id="timelineTitle">子代理微观活动流</div>
+                <div style="font-size: 13px; font-weight: 700; color: #fff;" id="timelineTitle">微观活动流水</div>
                 <span style="font-size: 11px; font-family: var(--font-mono); color: var(--text-dim);" id="timelineConvId"></span>
               </div>
               <ul class="timeline-list" id="timelineList"></ul>
@@ -725,19 +780,55 @@
       const cancelBtn = document.getElementById("cancelBtn");
       cancelBtn.style.display = isRunning ? "inline-flex" : "none";
 
-      // 子代理卡片网格
+      // 阶段交付成果渲染
+      const resultPanel = document.getElementById("resultPanel");
+      const resultContent = document.getElementById("resultContent");
+      const resultBadge = document.getElementById("resultBadge");
+      const responseText = job.result?.response || (job.result?.status === "ERROR" ? (job.result.error || "任务执行异常") : "");
+      if (responseText) {
+        resultPanel.style.display = "flex";
+        resultBadge.innerText = job.state === "success" ? "已交付" : (job.state === "error" ? "异常中断" : "阶段就绪");
+        resultBadge.style.color = job.state === "error" ? "#f87171" : "#34d399";
+        resultContent.innerText = responseText;
+      } else {
+        resultPanel.style.display = "none";
+      }
+
+      // 代理矩阵网格（主编排器卡片 + 子代理卡片）
       const subagents = job.progress.subagents || [];
-      document.getElementById("subagentCountBadge").innerText = subagents.length;
+      document.getElementById("subagentCountBadge").innerText = subagents.length > 0 ? `${subagents.length} 个子代理` : "主编排器推进";
       const grid = document.getElementById("subagentGrid");
 
+      // 始终在网格最前置渲染主编排器卡片
+      const isLeadSelected = selectedSubagentIndex === null;
+      let gridHtml = `
+        <div class="subagent-card ${isLeadSelected ? "selected" : ""}" onclick="selectSubagent(null)" style="border-color: ${isLeadSelected ? "var(--cyan)" : "rgba(14,165,233,0.3)"};">
+          <div class="subagent-card-header">
+            <div class="subagent-role" style="color: var(--cyan);">
+              <span style="display:inline-block; width:6px; height:6px; background:var(--cyan); border-radius:50%;"></span>
+              Lead Orchestrator (项目主编排器)
+            </div>
+            ${renderStatusTag(job.state)}
+          </div>
+          <div class="subagent-action-box">
+            ${formatActionHtml(job.progress.last_tool ? `[${job.progress.last_tool}] ${job.progress.current_action}` : job.progress.current_action)}
+          </div>
+          <div class="subagent-footer">
+            <span>步数: Step ${job.progress.current_step || 0}</span>
+            <span title="${job.conversationId || ""}">ID: ${(job.conversationId || job.jobId || "pending").slice(0, 8)}...</span>
+          </div>
+        </div>
+      `;
+
       if (subagents.length === 0) {
-        grid.innerHTML = `
-          <div style="grid-column: 1 / -1; padding: 24px; background: var(--bg-card); border-radius: 8px; border: 1px dashed var(--border-subtle); color: var(--text-dim); text-align: center; font-size: 13px;">
-            当前任务尚未启动 Teamwork 子代理，或正由主编排器独立推进中。
+        gridHtml += `
+          <div style="padding: 16px 20px; background: var(--bg-card); border-radius: 8px; border: 1px dashed var(--border-subtle); color: var(--text-dim); display: flex; flex-direction: column; justify-content: center; font-size: 12px; line-height: 1.6;">
+            <div>当前阶段由主编排器（Lead Orchestrator）推进。</div>
+            <div style="color: var(--text-muted); font-size: 11px;">在委派多代理团队或派发专项 Worker 后，协同子代理卡片将在此网格动态追加。</div>
           </div>
         `;
       } else {
-        grid.innerHTML = subagents.map((sub, idx) => {
+        gridHtml += subagents.map((sub, idx) => {
           const isCardSelected = selectedSubagentIndex === idx;
           return `
             <div class="subagent-card ${isCardSelected ? "selected" : ""}" onclick="selectSubagent(${idx})">
@@ -759,37 +850,50 @@
           `;
         }).join("");
       }
+      grid.innerHTML = gridHtml;
 
       // 渲染微观时间线
-      renderTimeline(subagents);
+      renderTimeline(job, subagents);
 
       // 日志渲染
       const logViewer = document.getElementById("logViewer");
       logViewer.innerText = job.logTail || "(暂无日志输出或日志文件为空)";
     }
 
-    // 选中某个子代理展开微观流水
+    // 选中某个子代理展开微观流水（传入 null 则选回主编排器）
     function selectSubagent(index) {
       selectedSubagentIndex = index;
       renderJobDetail();
     }
 
     // 渲染微观时间线
-    function renderTimeline(subagents) {
+    function renderTimeline(job, subagents) {
       const panel = document.getElementById("timelinePanel");
-      if (selectedSubagentIndex === null || !subagents[selectedSubagentIndex]) {
-        panel.style.display = "none";
-        return;
+      panel.style.display = "flex";
+
+      const isLead = selectedSubagentIndex === null;
+      let title = "";
+      let convId = "";
+      let acts = [];
+
+      if (isLead) {
+        title = "Lead Orchestrator (主编排器) 微观活动流水";
+        convId = `会话 ID: ${job.conversationId || job.jobId || "主会话"}`;
+        acts = job.progress.recent_activities || [];
+      } else {
+        const sub = subagents[selectedSubagentIndex];
+        if (sub) {
+          title = `${sub.role} 微观执行流水`;
+          convId = `会话 ID: ${sub.conversation_id || "未知"}`;
+          acts = sub.recent_activities || [];
+        }
       }
 
-      const sub = subagents[selectedSubagentIndex];
-      panel.style.display = "block";
-      document.getElementById("timelineTitle").innerText = `${sub.role} 微观执行流水`;
-      document.getElementById("timelineConvId").innerText = `会话 ID: ${sub.conversation_id || "未知"}`;
+      document.getElementById("timelineTitle").innerText = title;
+      document.getElementById("timelineConvId").innerText = convId;
 
       const list = document.getElementById("timelineList");
-      const acts = sub.recent_activities || [];
-      if (acts.length === 0) {
+      if (!acts || acts.length === 0) {
         list.innerHTML = '<li class="timeline-item">暂无微观步骤记录</li>';
       } else {
         list.innerHTML = acts.map((act) => `<li class="timeline-item">${formatActionHtml(act)}</li>`).join("");
