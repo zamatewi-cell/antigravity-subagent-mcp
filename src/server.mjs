@@ -161,6 +161,7 @@ function launchAgy(input, jobId = randomUUID()) {
     startedAt: startedAt.toISOString(),
     completedAt: null,
     invocation: {
+      prompt: input.prompt,
       model: invocation.model,
       cwd: invocation.cwd,
       timeout_seconds: invocation.timeoutSeconds,
@@ -449,7 +450,7 @@ function startWithPreflightRetry(input) {
       state: "queued",
       startedAt: new Date().toISOString(),
       completedAt: null,
-      invocation: { cwd, model: input.model || DEFAULT_MODEL },
+      invocation: { prompt: input.prompt, cwd, model: input.model || DEFAULT_MODEL },
       result: null,
       attempts: 1,
       completion: backgroundExecution,
