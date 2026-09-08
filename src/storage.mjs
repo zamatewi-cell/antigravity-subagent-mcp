@@ -65,12 +65,12 @@ export function restorePersistedJobs() {
         const data = JSON.parse(text);
         if (!data.jobId) continue;
 
-        if (["running", "stopping", "retrying"].includes(data.state)) {
+        if (["running", "stopping", "retrying", "queued"].includes(data.state)) {
           data.state = "interrupted";
           data.completedAt = data.completedAt || new Date().toISOString();
           data.result = data.result || {
             status: "ERROR",
-            error: "服务重新载入，该未完成的任务已被中断。",
+            error: "服务重新载入，该排队或未完成的任务已被中断。",
             error_details: { layer: "mcp_bridge", code: "SERVICE_RESTARTED" },
           };
         }

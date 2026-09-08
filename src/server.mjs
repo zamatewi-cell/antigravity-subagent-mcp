@@ -11,7 +11,7 @@ import { stopProcessTree, isRetryablePreflightFailure } from "./process-control.
 import { getTaskProgress } from "./progress.mjs";
 import { persistJob, restorePersistedJobs } from "./storage.mjs";
 
-const SERVER_VERSION = "1.2.1";
+const SERVER_VERSION = "1.2.2";
 const DEFAULT_MODEL = process.env.ANTIGRAVITY_DEFAULT_MODEL || "gemini-3.8-flash-high";
 const DEFAULT_PERMISSION_MODE = process.env.ANTIGRAVITY_PERMISSION_MODE || "auto-approve";
 const DEFAULT_TIMEOUT_SECONDS = 300;
@@ -412,6 +412,10 @@ function startWithPreflightRetry(input) {
 
   // 使用目录锁确保同目录异步后台任务也是串行排队运行
   const backgroundExecution = withDirectoryLock(cwd, null, async () => {
+    const existing = jobs.get(jobId);
+    if (existing && (existing.cancelRequested || existing.state === "cancelled")) {
+      return;
+    }
     firstJob = launchAgy(input, jobId);
     let currentJob = firstJob;
     for (let attempt = 1; attempt <= 3; attempt += 1) {
@@ -430,7 +434,7 @@ function startWithPreflightRetry(input) {
     }
   }).catch((error) => {
     const current = jobs.get(jobId);
-    if (current && !current.cancelRequested) {
+    if (current && !current.cancelRequested && current.state !== "cancelled") {
       current.state = "error";
       current.completedAt = new Date().toISOString();
       current.result = { status: "ERROR", error: sanitizeDiagnostics(error.message) };
@@ -559,7 +563,7 @@ server.registerTool(
   async ({ job_id }) => {
     const job = jobs.get(job_id);
     if (!job) return toolResponse({ status: "ERROR", error: `未找到任务：${job_id}` }, true);
-    if (job.state === "retrying") {
+    if (job.state === "queued" || job.state === "retrying") {
       job.cancelRequested = true;
       job.state = "cancelled";
       job.completedAt = new Date().toISOString();

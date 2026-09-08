@@ -145,8 +145,34 @@ export function formatToolAction(tc) {
   return `[${toolName}] 执行操作`;
 }
 
+const NEGATION_OR_IN_PROGRESS = /(?:未|尚未|还没|未曾|不曾|未完全|继续|还在|仍然|正在|进行中|排查|修复|检查|待办|未决|处理中|调试中|\bno\b|\bnot\b|\byet\b|\bstill\b|\bworking\b|\bin\s*progress\b|\bincomplete\b|\bfixing\b|\bpending\b|\bunfinished\b|\bongoing\b)/i;
+const ASKING_OR_HELP = /(?:求助|请示|询问|确认|是否|等待|进展|定时汇报|心跳|\bhelp\b|\bguidance\b|\bquestion\b|\bproceed\?)/i;
+
 /**
- * 依据明确的结束事件判断子代理状态，绝不依据步数猜测，证据不足维持 running
+ * 校验文本中是否具备确定性、无可争议的完工交付证据
+ * 严禁单纯因提及文件名（如 handoff.md）或孤立单词而判定完成
+ * @param {string} text 
+ * @returns {boolean}
+ */
+export function isExplicitlyCompleted(text) {
+  if (!text || typeof text !== "string") return false;
+  const str = text.trim();
+  if (!str) return false;
+
+  // 1. 若包含任何否定、未决、进行中修饰或求助倾向，一票否决
+  if (NEGATION_OR_IN_PROGRESS.test(str) || ASKING_OR_HELP.test(str)) {
+    return false;
+  }
+
+  // 2. 必须具备不可动摇的强完工交付声明
+  const hasExplicitCompletionClaim = /(?:(?:已|全部|已经|任务)(?:完成|交付|完工|搞定|闭环)|已交付成果|工作已结束|全部测试通过|全部用例通过|VICTORY\s+CONFIRMED|已生成\s*(?:[\w.-]+\/)*handoff\.md)/i.test(str);
+
+  return hasExplicitCompletionClaim;
+}
+
+/**
+ * 严格裁决子代理当前生命周期状态
+ * 准则：宁可判定为 running 或 unknown，绝不能在缺乏不可辩驳证据的情况下虚标 completed
  * @param {object} childParsed - 子代理 transcript 解析结果
  * @param {Set<string>} killedConversationIds - 父代理中被显式 kill 的会话 ID 集合
  * @param {string} parentState - 父任务整体状态
@@ -167,33 +193,36 @@ export function evaluateSubagentStatus(childParsed, killedConversationIds, paren
   const lastEntry = childParsed.lastEntry;
   if (!lastEntry) return "running";
 
-  // 若最后一步依然包含活跃工作工具（如运行命令、读写文件），坚决为 running
+  // 3. 若最后一步包含工具调用
   if (Array.isArray(lastEntry.tool_calls) && lastEntry.tool_calls.length > 0) {
-    const firstTool = lastEntry.tool_calls[0];
-    if (firstTool.name !== "send_message") {
+    // 只要包含任何非 send_message 工具（如写文件、执行命令、读文件等物理动作），必定是活跃执行中
+    const hasActiveWorkTools = lastEntry.tool_calls.some(t => t && t.name !== "send_message");
+    if (hasActiveWorkTools) {
       return "running";
     }
 
-    // 若调用了 send_message，仅当消息明确包含交付证据且不含求助/中间询问时，才视为完成
-    const msg = String(firstTool.args?.Message || "");
-    const isCompleted = /(?:任务完成|交付|完工|VICTORY CONFIRMED|handoff\.md|audit report|verdict)/i.test(msg);
-    const isAskingOrIntermediate = /(?:求助|请示|询问|确认|是否|等待|进展|定时汇报|心跳|help|guidance|proceed\?)/i.test(msg);
-    if (isCompleted && !isAskingOrIntermediate) {
+    // 若调用的全部为 send_message，提取所有消息内容合并判断
+    const messages = lastEntry.tool_calls
+      .filter(t => t && t.name === "send_message")
+      .map(t => String(t.args?.Message || ""))
+      .join(" ");
+
+    if (isExplicitlyCompleted(messages)) {
       return "completed";
     }
 
     return "running";
   }
 
-  // 3. 最后一步为纯回复（无工具调用）且状态为 DONE
+  // 4. 最后一步为纯回复（无工具调用）且状态为 DONE
   if (lastEntry.type === "PLANNER_RESPONSE" && (!lastEntry.tool_calls || lastEntry.tool_calls.length === 0)) {
     const text = String(lastEntry.content || "");
-    if (/(?:任务已完成|已全部完成|已交付成果|工作已结束|VICTORY)/i.test(text)) {
+    if (isExplicitlyCompleted(text)) {
       return "completed";
     }
   }
 
-  // 4. 证据不足时严格保持 running，绝不误标已完成
+  // 5. 证据不足时严格保持 running，绝不误标已完成
   return "running";
 }
 

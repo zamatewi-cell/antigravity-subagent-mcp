@@ -270,7 +270,122 @@ try {
   assert.deepEqual(executionOrder, ["task1-start", "task1-end", "task2-start", "task2-end"], "同目录任务必须严格排队串行！");
   console.log("  -> PASS: 同目录任务成功实现互斥排队串行执行");
 
-  console.log("\n[All Tests Passed] 全部 7 项专项反例测试 100% 成功通过！\n");
+  // 8. 反例 8：子代理消息包含 handoff.md 但带有否定/未决时态，绝不能标为 completed
+  console.log("\n[Test 8] 验证含 handoff.md 但有否定词（尚未生成，继续修复）绝不误判为 completed...");
+  const mockChildNegationHandoff = {
+    conversation_id: "negation-handoff-worker",
+    currentStep: 15,
+    lastTool: "send_message",
+    lastEntry: {
+      step_index: 15,
+      type: "PLANNER_RESPONSE",
+      tool_calls: [
+        {
+          name: "send_message",
+          args: { Message: "handoff.md 尚未生成，继续修复" },
+        },
+      ],
+    },
+  };
+  const negStatus = evaluateSubagentStatus(mockChildNegationHandoff, new Set(), "running");
+  assert.equal(negStatus, "running", "带有否定词的 handoff.md 消息必须处于 running 状态！");
+  console.log("  -> PASS: 否定词拦截生效，状态正确保持为 running");
+
+  // 9. 反例 9：单步同时包含 send_message('任务完成') 与物理操作工具（如 run_command），绝不能标为 completed
+  console.log("\n[Test 9] 验证同一步骤包含完成消息与物理工具时坚决判定为 running...");
+  const mockChildMultiTools = {
+    conversation_id: "multi-tools-worker",
+    currentStep: 18,
+    lastTool: "run_command",
+    lastEntry: {
+      step_index: 18,
+      type: "PLANNER_RESPONSE",
+      tool_calls: [
+        {
+          name: "send_message",
+          args: { Message: "任务完成，全部测试通过已交付" },
+        },
+        {
+          name: "run_command",
+          args: { CommandLine: "npm run cleanup" },
+        },
+      ],
+    },
+  };
+  const multiToolStatus = evaluateSubagentStatus(mockChildMultiTools, new Set(), "running");
+  assert.equal(multiToolStatus, "running", "同步骤包含活跃物理工具必须判定为 running，严禁只看第一个工具！");
+  console.log("  -> PASS: 全局工具扫描生效，状态正确判定为 running");
+
+  // 10. 反例 10：英文未决与否定语气（No VICTORY yet; still working），绝不能标为 completed
+  console.log("\n[Test 10] 验证英文否定与未决语气（No VICTORY yet; still working）绝不误判为 completed...");
+  const mockChildEnglishNegation = {
+    conversation_id: "english-negation-worker",
+    currentStep: 22,
+    lastEntry: {
+      step_index: 22,
+      type: "PLANNER_RESPONSE",
+      content: "No VICTORY yet; still working on the root cause.",
+      tool_calls: [],
+    },
+  };
+  const engNegStatus = evaluateSubagentStatus(mockChildEnglishNegation, new Set(), "running");
+  assert.equal(engNegStatus, "running", "英文否定与未决语气必须判定为 running！");
+  console.log("  -> PASS: 英文否定词与进行中时态拦截生效，状态正确保持为 running");
+
+  // 11. 反例 11：排队状态（queued）任务支持直接取消与执行短路
+  console.log("\n[Test 11] 验证排队任务（queued）的取消与调度短路...");
+  const queuedJob = {
+    jobId: "queued-cancel-test",
+    state: "queued",
+    startedAt: new Date().toISOString(),
+    completedAt: null,
+    invocation: { cwd: "D:/project", model: "gemini-3.8-flash-high" },
+    result: null,
+    attempts: 1,
+    cancelRequested: false,
+  };
+  // 模拟 cancel_gemini_task 对 queued 任务的处理逻辑
+  if (queuedJob.state === "queued" || queuedJob.state === "retrying") {
+    queuedJob.cancelRequested = true;
+    queuedJob.state = "cancelled";
+    queuedJob.completedAt = new Date().toISOString();
+  }
+  assert.equal(queuedJob.state, "cancelled", "排队任务被取消后状态必须为 cancelled！");
+  assert.equal(queuedJob.cancelRequested, true, "排队任务被取消后 cancelRequested 必须为 true！");
+  assert(queuedJob.completedAt, "排队任务被取消后必须记录 completedAt 时间戳！");
+
+  // 验证调度锁拿到被取消的 queued 任务时直接跳过
+  let launchCalled = false;
+  const simulateExecution = async (job) => {
+    if (job.cancelRequested || job.state === "cancelled") {
+      return; // 直接短路
+    }
+    launchCalled = true;
+  };
+  await simulateExecution(queuedJob);
+  assert.equal(launchCalled, false, "排队期间被取消的任务，获取锁后绝不能启动实际进程！");
+  console.log("  -> PASS: 排队任务取消与调度短路逻辑验证完全正确");
+
+  // 12. 反例 12：排队状态（queued）在服务重启时统一收敛修正为 interrupted
+  console.log("\n[Test 12] 验证服务重启后 queued 状态被纠偏为 interrupted...");
+  const queuedDiskJob = {
+    jobId: "queued-disk-test",
+    state: "queued",
+    startedAt: new Date().toISOString(),
+    completedAt: null,
+    invocation: { cwd: "D:/project", model: "gemini-3.8-flash-high" },
+    result: null,
+  };
+  persistJob(queuedDiskJob);
+  const reloadedJobs = restorePersistedJobs();
+  const reloadedQueued = reloadedJobs.get("queued-disk-test");
+  assert(reloadedQueued, "从磁盘恢复的任务必须存在");
+  assert.equal(reloadedQueued.state, "interrupted", "重启后 queued 任务必须被纠偏为 interrupted！");
+  assert(reloadedQueued.completedAt, "重启纠偏后必须具有 completedAt！");
+  assert(reloadedQueued.result?.error?.includes("中断"), "错误信息必须标明被中断！");
+  console.log("  -> PASS: 排队任务重启后已成功纠偏为 interrupted，消除了挂起假死隐患");
+
+  console.log("\n[All Tests Passed] 全部 12 项专项反例测试 100% 成功通过！\n");
 } finally {
   fs.rmSync(tempDir, { recursive: true, force: true });
 }

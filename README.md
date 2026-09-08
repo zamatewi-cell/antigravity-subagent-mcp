@@ -23,6 +23,14 @@ The bridge never invokes `--disable-slash-commands`. It uses AGY's required
 Per-job AGY logs are stored under `logs/` so a bridge response can be matched to
 the original backend error without scanning unrelated global CLI logs.
 
+Version 1.2.2 changes:
+
+- **Complete Negation & In-progress Defense**: Hardened `evaluateSubagentStatus` to eliminate completion false-positives. Replaced isolated keyword matching (e.g. standalone `handoff.md` or `VICTORY`) with strict affirmation patterns. Messages containing negative or in-progress modifiers (e.g. "尚未生成，继续修复", "No VICTORY yet; still working") are categorically barred from being marked `completed`.
+- **Comprehensive Multi-tool Step Scanning**: Inspects the entirety of `lastEntry.tool_calls` rather than solely the first element. Any step containing active filesystem/terminal tools alongside `send_message` strictly remains `running`.
+- **Queued Task Cancellation**: `cancel_gemini_task` now supports immediately canceling `queued` tasks awaiting directory concurrency locks, transitioning their state directly to `cancelled` and short-circuiting execution when the lock becomes free.
+- **Restart Convergence for Queued Jobs**: `restorePersistedJobs` now converges orphaned `queued` jobs into `interrupted` upon server reboot, completely preventing zombie waiting states.
+- **Handshake Version Parity**: Synchronized server handshake version to `1.2.2`.
+
 Version 1.2.1 changes:
 
 - **Strict Evidence-Based Lifecycle Evaluation**: Completely eliminated heuristic step count thresholds (e.g. step >= 30) and naive tool-name assumptions. Agents performing active tools (commands, edits) or asking questions remain strictly `running`; only explicit completion evidence (finished handoffs/verdicts or parent kills) marks `completed`. Inconclusive evidence defaults to `running`/`unknown`.
