@@ -1,4 +1,4 @@
-﻿import assert from "node:assert/strict";
+import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import http from "node:http";
@@ -125,6 +125,80 @@ async function runTests() {
   } finally {
     await dashInstance.close();
   }
+
+  console.log("--- 4. 测试独立 Dashboard（无 child 句柄）拦截假取消 ---");
+  // 模拟 Standalone 模式：无 memoryJobs，磁盘中存在一个正在运行的任务
+  const fakeStandaloneJob = {
+    jobId: "test-standalone-running-" + Date.now(),
+    state: "running",
+    startedAt: new Date().toISOString(),
+    completedAt: null,
+    invocation: { prompt: "standalone fake cancel test", cwd: process.cwd() },
+    result: null,
+  };
+  const jobsDir = path.resolve(__dirname, "..", "data", "jobs");
+  fs.mkdirSync(jobsDir, { recursive: true });
+  fs.writeFileSync(path.join(jobsDir, `${fakeStandaloneJob.jobId}.json`), JSON.stringify(fakeStandaloneJob, null, 2), "utf8");
+
+  // 启动一个没有 memoryJobs 注入的独立看板服务实例
+  const standaloneInstance = await startDashboardServer({
+    port: 13726,
+    autoOpen: false,
+  });
+
+  try {
+    const postStandaloneRes = await new Promise((resolve, reject) => {
+      const req = http.request({
+        hostname: "localhost",
+        port: 13726,
+        path: `/api/jobs/${fakeStandaloneJob.jobId}/cancel`,
+        method: "POST",
+      }, (res) => {
+        let body = "";
+        res.on("data", (chunk) => body += chunk);
+        res.on("end", () => resolve({ statusCode: res.statusCode, body: JSON.parse(body) }));
+      });
+      req.on("error", reject);
+      req.end();
+    });
+
+    assert.equal(postStandaloneRes.statusCode, 409, "独立看板无 child 句柄取消运行中任务必须返回 409 Conflict！");
+    assert.equal(postStandaloneRes.body.code, "STANDALONE_CANCEL_FORBIDDEN", "错误码必须为 STANDALONE_CANCEL_FORBIDDEN");
+
+    // 检查磁盘 JSON 是否被破坏
+    const diskContentAfter = JSON.parse(fs.readFileSync(path.join(jobsDir, `${fakeStandaloneJob.jobId}.json`), "utf8"));
+    assert.equal(diskContentAfter.state, "running", "独立看板拒绝取消后，磁盘任务状态绝不能被假改为 cancelled！");
+    console.log("✔ 独立看板假取消拦截与防篡改验证通过（HTTP 409 + 磁盘状态保护）");
+  } finally {
+    await standaloneInstance.close();
+    try { fs.unlinkSync(path.join(jobsDir, `${fakeStandaloneJob.jobId}.json`)); } catch {}
+  }
+
+  console.log("--- 5. 测试首发终止原因胜出保护（不抹杀 timed_out / output_limit 语义） ---");
+  const timeoutJob = {
+    jobId: "test-timeout-job-" + Date.now(),
+    state: "running",
+    startedAt: new Date().toISOString(),
+    completedAt: null,
+    invocation: { prompt: "timeout priority test", cwd: process.cwd() },
+    result: null,
+  };
+  // 模拟先发生超时
+  timeoutJob.stopReason = "timed_out";
+  timeoutJob.state = "error";
+  timeoutJob.result = {
+    status: "ERROR",
+    error: "执行超时被终止。",
+    error_details: { layer: "mcp_bridge", code: "TIMEOUT" },
+  };
+
+  // 随后并发或延迟调用 cancelJob
+  await cancelJob(timeoutJob);
+
+  assert.equal(timeoutJob.stopReason, "timed_out", "首发终止原因 timed_out 必须受到保护，不得被覆盖为 cancelled！");
+  assert.equal(timeoutJob.state, "error", "超时终态必须保持 error！");
+  assert.equal(timeoutJob.result.error_details.code, "TIMEOUT", "错误详情必须保留 TIMEOUT 语义！");
+  console.log("✔ 首发终止原因胜出保护测试通过");
 
   console.log("\n 全部统一取消与生命周期防漂移测试 100% 通过！");
 }

@@ -73,6 +73,7 @@ export function restorePersistedJobs() {
             error: "服务重新载入，该排队或未完成的任务已被中断。",
             error_details: { layer: "mcp_bridge", code: "SERVICE_RESTARTED" },
           };
+          persistJob(data);
         }
 
         jobs.set(data.jobId, data);

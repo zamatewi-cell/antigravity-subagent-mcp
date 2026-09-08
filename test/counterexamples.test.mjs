@@ -385,7 +385,87 @@ try {
   assert(reloadedQueued.result?.error?.includes("中断"), "错误信息必须标明被中断！");
   console.log("  -> PASS: 排队任务重启后已成功纠偏为 interrupted，消除了挂起假死隐患");
 
-  console.log("\n[All Tests Passed] 全部 12 项专项反例测试 100% 成功通过！\n");
+  // 13. 反例 13：真实子代理完工报告（含复盘总结词与副词）必须准确判定为 completed
+  console.log("\n[Test 13] 验证真实子代理完工汇报（含修复/检查历史总结）准确判定为 completed...");
+  const mockCodebaseExplorerDone = {
+    conversation_id: "explorer-uuid-1",
+    currentStep: 2,
+    lastTool: "send_message",
+    lastEntry: {
+      step_index: 2,
+      type: "PLANNER_RESPONSE",
+      tool_calls: [
+        {
+          name: "send_message",
+          args: { Message: "报告：已完成 codebase 探索与结构梳理。" },
+        },
+      ],
+    },
+  };
+  assert.equal(evaluateSubagentStatus(mockCodebaseExplorerDone, new Set(), "running"), "completed", "Codebase 探索完成汇报必须判定为 completed！");
+
+  const mockWorkerM1SummaryDone = {
+    conversation_id: "worker-m1-uuid",
+    currentStep: 18,
+    lastTool: "send_message",
+    lastEntry: {
+      step_index: 18,
+      type: "PLANNER_RESPONSE",
+      tool_calls: [
+        {
+          name: "send_message",
+          args: { Message: "报告：已成功闭环交付 Day01~03 模块开发与测试。修复了 Socket 资源泄漏缺陷，检查了 RAII 内存卫士，全部测试通过。" },
+        },
+      ],
+    },
+  };
+  assert.equal(evaluateSubagentStatus(mockWorkerM1SummaryDone, new Set(), "running"), "completed", "包含修复历史总结但明确交付闭环的报告必须判定为 completed，绝不能误标为 running！");
+
+  const mockEnglishDone = {
+    conversation_id: "english-worker-uuid",
+    currentStep: 10,
+    lastEntry: {
+      step_index: 10,
+      type: "PLANNER_RESPONSE",
+      content: "All tasks completed successfully, verified and delivered.",
+    },
+  };
+  assert.equal(evaluateSubagentStatus(mockEnglishDone, new Set(), "running"), "completed", "英文完工交付表述必须判定为 completed！");
+  console.log("  -> PASS: 完工副词与历史复盘总结准确识别，根除现场运行中误判");
+
+  // 14. 反例 14：显式 kill 的子代理必须裁决为 killed，严禁判定为 completed
+  console.log("\n[Test 14] 验证显式终止的子代理状态裁决为 killed...");
+  const killedIds = new Set(["killed-sub-123"]);
+  const mockKilledSubagent = {
+    conversation_id: "killed-sub-123",
+    currentStep: 5,
+    lastEntry: { step_index: 5, type: "PLANNER_RESPONSE", content: "doing work..." },
+  };
+  const killedStatus = evaluateSubagentStatus(mockKilledSubagent, killedIds, "running");
+  assert.equal(killedStatus, "killed", "被终止的子代理必须判定为 killed，严禁逻辑反转判定为 completed！");
+  console.log("  -> PASS: 被终止子代理正确判定为 killed");
+
+  // 15. 反例 15：重启纠偏后的 interrupted 任务真实原子写回磁盘
+  console.log("\n[Test 15] 验证重启纠偏后的任务原子持久化落盘（消除磁盘脏数据）...");
+  const diskPath = path.join(root, "data", "jobs", "queued-disk-test.json");
+  assert(fs.existsSync(diskPath), "任务持久化文件必须在磁盘存在");
+  const onDiskJson = JSON.parse(fs.readFileSync(diskPath, "utf8"));
+  assert.equal(onDiskJson.state, "interrupted", "磁盘上的持久化 JSON 必须同步纠偏为 interrupted！");
+  assert.equal(onDiskJson.result?.error_details?.code, "SERVICE_RESTARTED", "磁盘上的错误码必须同步落盘！");
+  console.log("  -> PASS: 纠偏状态成功原子落盘");
+
+  // 16. 反例 16：transcript 文件的 mtime 与 size 缓存命中验证
+  console.log("\n[Test 16] 验证 transcript 解析结果缓存机制...");
+  const cacheTestFile = path.join(tempDir, "cache_test.jsonl");
+  fs.writeFileSync(cacheTestFile, JSON.stringify({ step_index: 1, type: "PLANNER_RESPONSE", content: "第一步" }) + "\n", "utf8");
+  const firstParse = parseTranscript(cacheTestFile);
+  assert(firstParse, "初次解析必须成功");
+  assert.equal(firstParse.currentAction, "第一步");
+  const secondParse = parseTranscript(cacheTestFile);
+  assert.strictEqual(firstParse, secondParse, "在文件未修改时，第二次解析必须直接命中内存缓存对象！");
+  console.log("  -> PASS: transcript 缓存机制生效，大幅降低高频广播 I/O");
+
+  console.log("\n[All Tests Passed] 全部 16 项专项反例测试 100% 成功通过！\n");
 } finally {
   fs.rmSync(tempDir, { recursive: true, force: true });
 }

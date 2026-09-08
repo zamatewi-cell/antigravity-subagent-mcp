@@ -99,10 +99,43 @@ try {
   assert.equal(statusResp.statusCode, 200);
   const statusData = JSON.parse(statusResp.body);
   assert.equal(statusData.status, "OK");
-  assert.equal(statusData.version, "1.3.0");
+  assert.equal(statusData.version, "1.3.1");
   assert.equal(statusData.total_jobs, 2);
   assert.equal(statusData.active_jobs, 2);
   console.log("  -> PASS: 状态接口统计准确无误");
+
+  // 3.1 验证 CORS 收紧（禁止向外部未受信 Origin 开放通配符 *）
+  console.log("\n[Test 3.1] 验证 CORS 收紧机制（禁止向外部域反射 *）...");
+  const evilOriginRes = await new Promise((resolve, reject) => {
+    const u = new URL(`${dashboard.url}/api/status`);
+    const req = http.request({
+      hostname: u.hostname,
+      port: u.port,
+      path: u.pathname,
+      headers: { Origin: "https://malicious-site.example.com" },
+    }, (res) => {
+      resolve({ headers: res.headers });
+    });
+    req.on("error", reject);
+    req.end();
+  });
+  assert.equal(evilOriginRes.headers["access-control-allow-origin"], undefined, "未受信外部域绝不能获得 Access-Control-Allow-Origin 授权！");
+
+  const localOriginRes = await new Promise((resolve, reject) => {
+    const u = new URL(`${dashboard.url}/api/status`);
+    const req = http.request({
+      hostname: u.hostname,
+      port: u.port,
+      path: u.pathname,
+      headers: { Origin: "http://localhost:3000" },
+    }, (res) => {
+      resolve({ headers: res.headers });
+    });
+    req.on("error", reject);
+    req.end();
+  });
+  assert.equal(localOriginRes.headers["access-control-allow-origin"], "http://localhost:3000", "本地合法开发域正确获得授权");
+  console.log("  -> PASS: CORS 安全访问控制收紧生效");
 
   // 4. 测试 /api/jobs 接口
   console.log("\n[Test 4] 验证 GET /api/jobs 任务列表及微观结构...");
@@ -124,6 +157,21 @@ try {
   assert.equal(detailData.jobId, sampleJobId);
   assert.equal(detailData.invocation.slash_command, "/teamwork-preview");
   console.log("  -> PASS: 任务详情接口正常");
+
+  // 5.1 验证 logTail 输出脱敏
+  console.log("\n[Test 5.1] 验证 formatJobDetail 中 logTail 经过敏感信息脱敏...");
+  const sensitiveLogFile = path.join(tempDir, "sensitive.log");
+  fs.writeFileSync(sensitiveLogFile, "User secret: AIzaSyD-Secret1234567890abcdef123456 in path C:\\Users\\Administrator\\.gemini\\keys", "utf8");
+  const sensitiveJob = {
+    jobId: "sensitive-job-789",
+    state: "running",
+    startedAt: new Date().toISOString(),
+    invocation: { log_file: sensitiveLogFile, cwd: tempDir },
+  };
+  const formattedSensitive = formatJobDetail(sensitiveJob);
+  assert(!formattedSensitive.logTail.includes("AIzaSyD-Secret1234567890abcdef123456"), "敏感 API Key 绝不能直接暴露在 logTail！");
+  assert(formattedSensitive.logTail.includes("[redacted-key]") || formattedSensitive.logTail.includes("[redacted]"), "敏感 Key 必须被脱敏替换");
+  console.log("  -> PASS: 物理日志尾部脱敏生效");
 
   // 6. 测试 /api/jobs/:id/cancel 取消接口
   console.log("\n[Test 6] 验证 POST /api/jobs/:id/cancel 终止排队任务...");

@@ -145,8 +145,17 @@ export function formatToolAction(tc) {
   return `[${toolName}] 执行操作`;
 }
 
-const NEGATION_OR_IN_PROGRESS = /(?:未|尚未|还没|未曾|不曾|未完全|继续|还在|仍然|正在|进行中|排查|修复|检查|待办|未决|处理中|调试中|\bno\b|\bnot\b|\byet\b|\bstill\b|\bworking\b|\bin\s*progress\b|\bincomplete\b|\bfixing\b|\bpending\b|\bunfinished\b|\bongoing\b)/i;
-const ASKING_OR_HELP = /(?:求助|请示|询问|确认|是否|等待|进展|定时汇报|心跳|\bhelp\b|\bguidance\b|\bquestion\b|\bproceed\?)/i;
+// 针对完工动词的显式否定修饰
+const NEGATED_COMPLETION = /(?:(?:未|尚未|还没|未曾|不曾|并未|未能)(?:完全)?(?:完成|交付|完工|搞定|闭环|通过)|\bnot\s+(?:yet\s+)?(?:completed|done|finished|delivered|passed))/i;
+
+// 明确且活跃的进行时态动作声明（正在进行中，尚未交付）
+const EXPLICIT_IN_PROGRESS = /(?:正在(?:排查|修复|检查|处理|构建|调试|执行|推进|编写)|还在(?:继续|排查|修复|处理|推进)|继续(?:排查|修复|推进|调试|编写)|未决|待办中|处理中|\bstill\s*(?:working|fixing|debugging|running|processing)|\bin\s*progress|\bongoing)/i;
+
+// 中途求助、请示、疑问
+const ASKING_OR_HELP = /(?:求助|请示|询问|等待回复|确认是否|心跳汇报|\bhelp\b|\bquestion\b|\bproceed\?)/i;
+
+// 强完工交付证据（支持副词修饰、动宾短语与英文标准交付表述）
+const EXPLICIT_COMPLETION_CLAIM = /(?:(?:已|全部|已经|任务|均已|顺利|成功)(?:[^\n，。！？]{0,8}?)(?:完成|交付|完工|搞定|闭环)|已交付成果|工作已结束|全部测试通过|全部用例通过|VICTORY\s+CONFIRMED|all\s+tasks?\s+completed|successfully\s+(?:completed|delivered|finished)|(?:work|implementation)\s+(?:done|completed)|已生成\s*(?:[\w.-]+\/)*handoff\.md)/i;
 
 /**
  * 校验文本中是否具备确定性、无可争议的完工交付证据
@@ -159,15 +168,13 @@ export function isExplicitlyCompleted(text) {
   const str = text.trim();
   if (!str) return false;
 
-  // 1. 若包含任何否定、未决、进行中修饰或求助倾向，一票否决
-  if (NEGATION_OR_IN_PROGRESS.test(str) || ASKING_OR_HELP.test(str)) {
+  // 1. 若包含明确否定完工修饰、活跃进行中时态或求助倾向，一票否决
+  if (NEGATED_COMPLETION.test(str) || EXPLICIT_IN_PROGRESS.test(str) || ASKING_OR_HELP.test(str)) {
     return false;
   }
 
   // 2. 必须具备不可动摇的强完工交付声明
-  const hasExplicitCompletionClaim = /(?:(?:已|全部|已经|任务)(?:完成|交付|完工|搞定|闭环)|已交付成果|工作已结束|全部测试通过|全部用例通过|VICTORY\s+CONFIRMED|已生成\s*(?:[\w.-]+\/)*handoff\.md)/i.test(str);
-
-  return hasExplicitCompletionClaim;
+  return EXPLICIT_COMPLETION_CLAIM.test(str);
 }
 
 /**
@@ -176,7 +183,7 @@ export function isExplicitlyCompleted(text) {
  * @param {object} childParsed - 子代理 transcript 解析结果
  * @param {Set<string>} killedConversationIds - 父代理中被显式 kill 的会话 ID 集合
  * @param {string} parentState - 父任务整体状态
- * @returns {string} - "running" | "completed" | "error" | "unknown"
+ * @returns {string} - "running" | "completed" | "killed" | "error" | "unknown"
  */
 export function evaluateSubagentStatus(childParsed, killedConversationIds, parentState) {
   if (!childParsed) return "unknown";
@@ -186,23 +193,23 @@ export function evaluateSubagentStatus(childParsed, killedConversationIds, paren
     return "completed";
   }
   if (killedConversationIds && childParsed.conversation_id && killedConversationIds.has(childParsed.conversation_id)) {
-    return "completed";
+    return "killed";
   }
 
-  // 2. 检查子代理日志最后一步
-  const lastEntry = childParsed.lastEntry;
-  if (!lastEntry) return "running";
+  // 2. 检查子代理最近一次的主动执行步骤（优先使用 lastPlannerEntry 回退到 lastEntry）
+  const activeEntry = childParsed.lastPlannerEntry || childParsed.lastEntry;
+  if (!activeEntry) return "running";
 
   // 3. 若最后一步包含工具调用
-  if (Array.isArray(lastEntry.tool_calls) && lastEntry.tool_calls.length > 0) {
+  if (Array.isArray(activeEntry.tool_calls) && activeEntry.tool_calls.length > 0) {
     // 只要包含任何非 send_message 工具（如写文件、执行命令、读文件等物理动作），必定是活跃执行中
-    const hasActiveWorkTools = lastEntry.tool_calls.some(t => t && t.name !== "send_message");
+    const hasActiveWorkTools = activeEntry.tool_calls.some(t => t && t.name !== "send_message");
     if (hasActiveWorkTools) {
       return "running";
     }
 
     // 若调用的全部为 send_message，提取所有消息内容合并判断
-    const messages = lastEntry.tool_calls
+    const messages = activeEntry.tool_calls
       .filter(t => t && t.name === "send_message")
       .map(t => String(t.args?.Message || ""))
       .join(" ");
@@ -215,8 +222,8 @@ export function evaluateSubagentStatus(childParsed, killedConversationIds, paren
   }
 
   // 4. 最后一步为纯回复（无工具调用）且状态为 DONE
-  if (lastEntry.type === "PLANNER_RESPONSE" && (!lastEntry.tool_calls || lastEntry.tool_calls.length === 0)) {
-    const text = String(lastEntry.content || "");
+  if (activeEntry.type === "PLANNER_RESPONSE" && (!activeEntry.tool_calls || activeEntry.tool_calls.length === 0)) {
+    const text = String(activeEntry.content || "");
     if (isExplicitlyCompleted(text)) {
       return "completed";
     }
@@ -226,8 +233,12 @@ export function evaluateSubagentStatus(childParsed, killedConversationIds, paren
   return "running";
 }
 
+// 文件级别 transcript 解析结果缓存：transcriptPath -> { mtimeMs, size, parsed }
+const transcriptCache = new Map();
+
 /**
  * 递归解析 transcript 文件，提取实时运行状态与全员子代理微观工作明细
+ * 引入 mtimeMs / size 缓存机制，避免每秒广播对海量日志文件全量同步读取造成的性能卡顿
  * @param {string} transcriptPath - transcript 文件绝对路径
  * @param {number} depth - 当前递归层级（防止无限嵌套）
  * @param {number} maxDepth - 最大递归深度（默认支持8级深度）
@@ -240,6 +251,18 @@ export function parseTranscript(transcriptPath, depth = 0, maxDepth = 8, visited
   if (visited.has(transcriptPath)) return null;
   visited.add(transcriptPath);
 
+  let stats = null;
+  try {
+    stats = fs.statSync(transcriptPath);
+  } catch {
+    return null;
+  }
+
+  const cached = transcriptCache.get(transcriptPath);
+  if (cached && cached.mtimeMs === stats.mtimeMs && cached.size === stats.size) {
+    return cached.parsed;
+  }
+
   try {
     const content = fs.readFileSync(transcriptPath, "utf8");
     const lines = content.split(/\r?\n/).filter(Boolean);
@@ -250,6 +273,7 @@ export function parseTranscript(transcriptPath, depth = 0, maxDepth = 8, visited
     let lastTool = null;
     let lastThinking = "";
     let lastEntry = null;
+    let lastPlannerEntry = null;
     const pendingSubagents = [];
     const directSubagents = [];
     const recentActivities = [];
@@ -260,6 +284,9 @@ export function parseTranscript(transcriptPath, depth = 0, maxDepth = 8, visited
       if (!entry) continue;
 
       lastEntry = entry;
+      if (entry.type === "PLANNER_RESPONSE" || (Array.isArray(entry.tool_calls) && entry.tool_calls.length > 0)) {
+        lastPlannerEntry = entry;
+      }
       if (typeof entry.step_index === "number") {
         currentStep = Math.max(currentStep, entry.step_index);
       }
@@ -387,14 +414,23 @@ export function parseTranscript(transcriptPath, depth = 0, maxDepth = 8, visited
     const maxSubStep = allDiscoveredSubagents.reduce((m, s) => Math.max(m, s.step || 0), 0);
     const aggregatedStep = Math.max(currentStep, maxSubStep);
 
-    return {
+    const result = {
       currentStep: aggregatedStep,
       currentAction,
       lastTool,
       lastEntry,
+      lastPlannerEntry,
       subagents: allDiscoveredSubagents,
       recentActivities: recentActivities.slice(-100),
     };
+    if (stats) {
+      transcriptCache.set(transcriptPath, {
+        mtimeMs: stats.mtimeMs,
+        size: stats.size,
+        parsed: result,
+      });
+    }
+    return result;
   } catch {
     return null;
   }

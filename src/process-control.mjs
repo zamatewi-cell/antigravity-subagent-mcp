@@ -39,7 +39,10 @@ export async function stopProcessTree(child) {
 export function stopJob(job, reason) {
   if (!job) return Promise.resolve();
   if (job.stopPromise) return job.stopPromise;
-  job.stopReason = reason;
+  // 保持第一终止原因胜出原则（如已记录 timed_out 或 output_limit，则不被后续改写）
+  if (!job.stopReason) {
+    job.stopReason = reason;
+  }
   job.state = "stopping";
   if (reason === "cancelled") job.cancelRequested = true;
   if (job.timeoutHandle) {
@@ -61,6 +64,7 @@ export function stopJob(job, reason) {
 /**
  * 统一取消任务控制器（供 MCP cancel_gemini_task、Dashboard API、进程关闭钩子等统一复用）
  * 消除 Windows 弱 kill 缺陷，杜绝后续 close 处理器将取消状态漂移改写为 error
+ * 同时严格遵守第一终止原因胜出原则，不抹杀既有的 timed_out / output_limit 语义
  * @param {object} job
  * @returns {Promise<object>}
  */
@@ -70,7 +74,7 @@ export async function cancelJob(job) {
   // 1. 排队或重试中：直接收敛为 cancelled 终态
   if (job.state === "queued" || job.state === "retrying") {
     job.cancelRequested = true;
-    job.stopReason = "cancelled";
+    job.stopReason = job.stopReason || "cancelled";
     job.state = "cancelled";
     job.completedAt = new Date().toISOString();
     job.result = {
@@ -89,8 +93,9 @@ export async function cancelJob(job) {
     return job;
   }
 
-  // 3. 运行中或停止中：设置 stopReason 并调用 stopProcessTree 强杀整个子进程树
-  await stopJob(job, "cancelled");
+  // 3. 运行中或停止中：若已存在其它非 cancelled 终止原因（如 timed_out），优先保留
+  const effectiveReason = (job.stopReason && job.stopReason !== "cancelled") ? job.stopReason : "cancelled";
+  await stopJob(job, effectiveReason);
   persistJob(job);
 
   if (job.terminationError) {
@@ -106,17 +111,23 @@ export async function cancelJob(job) {
     ]);
   }
 
-  // 确保状态稳定为 cancelled，避免任何微时序导致的未收敛
-  if (!job.terminationError && job.state !== "cancelled") {
-    job.state = "cancelled";
-    if (!job.completedAt) job.completedAt = new Date().toISOString();
-    if (!job.result || job.result.status !== "CANCELLED") {
-      job.result = {
-        status: "CANCELLED",
-        response: job.result?.response || "",
-        error: "任务已取消。",
-        error_details: { layer: "mcp_bridge", code: "CANCELLED" },
-      };
+  // 确保状态稳定收敛：若既有原因为 timed_out 或 output_limit，保持其错误终态；否则收敛为 cancelled
+  if (!job.terminationError) {
+    if (job.stopReason && job.stopReason !== "cancelled") {
+      if (job.state === "stopping") {
+        job.state = "error";
+      }
+    } else if (job.state !== "cancelled") {
+      job.state = "cancelled";
+      if (!job.completedAt) job.completedAt = new Date().toISOString();
+      if (!job.result || job.result.status !== "CANCELLED") {
+        job.result = {
+          status: "CANCELLED",
+          response: job.result?.response || "",
+          error: "任务已取消。",
+          error_details: { layer: "mcp_bridge", code: "CANCELLED" },
+        };
+      }
     }
   }
 

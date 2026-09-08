@@ -1,5 +1,6 @@
 export function sanitizeDiagnostics(value, limit = 12_000) {
   return String(value || "")
+    .replace(/AIzaSy[A-Za-z0-9_-]{33}/g, "[redacted-key]")
     .replace(/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/g, "[redacted-email]")
     .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+/gi, "$1 [redacted]")
     .replace(/((?:["']?(?:access[_-]?token|refresh[_-]?token|authorization|api[_-]?key|secret)["']?)\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s&,;}]+)/gi, "$1[redacted]")

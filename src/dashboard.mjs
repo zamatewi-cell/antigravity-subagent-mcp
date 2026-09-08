@@ -6,6 +6,7 @@ import { exec } from "node:child_process";
 import { restorePersistedJobs, persistJob } from "./storage.mjs";
 import { getTaskProgress } from "./progress.mjs";
 import { cancelJob } from "./process-control.mjs";
+import { sanitizeDiagnostics } from "./diagnostics.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -13,7 +14,7 @@ const WEB_ROOT = path.resolve(__dirname, "web");
 const HTML_FILE = path.join(WEB_ROOT, "index.html");
 
 const DEFAULT_PORT = Number(process.env.ANTIGRAVITY_DASHBOARD_PORT) || 3721;
-const DASHBOARD_VERSION = "1.3.0";
+const DASHBOARD_VERSION = "1.3.1";
 
 /**
  * 格式化输出提供给前端看板的任务视图对象
@@ -22,9 +23,18 @@ const DASHBOARD_VERSION = "1.3.0";
  */
 export function formatJobDetail(job) {
   if (!job) return null;
-  const progress = getTaskProgress(job);
 
-  // 尝试读取物理日志尾部（若有）
+  // 终态任务直接复用固化进度缓存，杜绝重复 I/O
+  const isTerminal = ["completed", "success", "error", "cancelled", "interrupted"].includes(job.state);
+  let progress = isTerminal && job._cachedProgress ? job._cachedProgress : null;
+  if (!progress) {
+    progress = getTaskProgress(job);
+    if (isTerminal) {
+      job._cachedProgress = progress;
+    }
+  }
+
+  // 尝试读取物理日志尾部（若有），并经过全量诊断脱敏
   let logTail = "";
   const logFile = job.invocation?.log_file;
   if (logFile && fs.existsSync(logFile)) {
@@ -35,7 +45,7 @@ export function formatJobDetail(job) {
       const fd = fs.openSync(logFile, "r");
       fs.readSync(fd, buffer, 0, readBytes, Math.max(0, stats.size - readBytes));
       fs.closeSync(fd);
-      logTail = buffer.toString("utf8");
+      logTail = sanitizeDiagnostics(buffer.toString("utf8"), 16 * 1024);
     } catch {
       logTail = "";
     }
@@ -135,10 +145,13 @@ export function startDashboardServer(options = {}) {
   }
 
   const server = http.createServer(async (req, res) => {
-    // 跨域支持与预检
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    // 跨域支持与预检（收紧来源，仅允许本地 localhost/127.0.0.1 或同源请求）
+    const origin = req.headers.origin;
+    if (origin && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
+      res.setHeader("Access-Control-Allow-Origin", origin);
+      res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    }
     if (req.method === "OPTIONS") {
       res.writeHead(204);
       res.end();
@@ -212,21 +225,37 @@ export function startDashboardServer(options = {}) {
         return;
       }
 
+      // 独立模式假取消拦截：当任务处于活跃子进程运行状态时，必须拥有子进程句柄才能真正执行进程树强杀
+      // 若当前看板进程无 child 句柄（即独立进程 npm run dashboard），严禁伪造取消和改写磁盘，避免跨进程状态冲突与幽灵进程
+      const isProcessRunning = ["running", "stopping"].includes(job.state);
+      const hasLiveHandle = Boolean(job.child && typeof job.child.kill === "function");
+      if (isProcessRunning && !hasLiveHandle) {
+        res.writeHead(409, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({
+          error: `无法在独立看板中取消任务 ${jobId}：该任务的执行子进程受宿主 MCP 进程管理。请直接在宿主 MCP 或客户端中取消，禁止跨进程篡改状态。`,
+          code: "STANDALONE_CANCEL_FORBIDDEN",
+        }));
+        return;
+      }
+
       await cancelJob(job);
 
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify({ status: "SUCCESS", message: `任务 ${jobId} 已请求取消`, job: formatJobDetail(job) }));
+      res.end(JSON.stringify({ status: "SUCCESS", message: `任务 ${jobId} 已成功取消`, job: formatJobDetail(job) }));
       return;
     }
 
     // 6. SSE 实时事件流
     if (pathname === "/api/stream") {
-      res.writeHead(200, {
+      const headers = {
         "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache",
         "Connection": "keep-alive",
-        "Access-Control-Allow-Origin": "*",
-      });
+      };
+      if (origin && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
+        headers["Access-Control-Allow-Origin"] = origin;
+      }
+      res.writeHead(200, headers);
       res.write("event: connected\ndata: {}\n\n");
       sseClients.add(res);
 

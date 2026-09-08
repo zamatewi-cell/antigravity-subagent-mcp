@@ -187,6 +187,7 @@
     .status-completed, .status-success { background: var(--green-dim); color: var(--green); border: 1px solid rgba(16, 185, 129, 0.3); }
     .status-queued { background: var(--yellow-dim); color: var(--yellow); border: 1px solid rgba(245, 158, 11, 0.3); }
     .status-cancelled { background: rgba(148, 163, 184, 0.1); color: var(--text-muted); border: 1px solid rgba(148, 163, 184, 0.2); }
+    .status-killed { background: rgba(168, 85, 247, 0.15); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.3); }
     .status-error, .status-interrupted { background: var(--red-dim); color: var(--red); border: 1px solid rgba(244, 63, 94, 0.3); }
 
     .task-prompt-preview {
@@ -684,10 +685,11 @@
     let selectedSubagentIndex = null;
     let currentTab = "subagents";
 
-    // 工具调用高亮格式化
+    // 工具调用高亮格式化（先经 escapeHtml 全量脱敏，杜绝 DOM XSS 注入）
     function formatActionHtml(actionText) {
       if (!actionText) return '<span style="color: var(--text-dim);">等待工具响应...</span>';
-      return actionText.replace(/\[(\w+)\]/g, '<span class="tool-tag">[$1]</span>');
+      const safe = escapeHtml(String(actionText));
+      return safe.replace(/\[(\w+)\]/g, '<span class="tool-tag">[$1]</span>');
     }
 
     // 状态样式标签
@@ -699,6 +701,7 @@
         success: "已完成",
         completed: "已交付",
         cancelled: "已取消",
+        killed: "已终止",
         interrupted: "已中断",
         error: "异常",
       };
@@ -907,10 +910,14 @@
       try {
         const resp = await fetch(`/api/jobs/${selectedJobId}/cancel`, { method: "POST" });
         const data = await resp.json();
-        alert(data.message || "已请求取消");
+        if (!resp.ok) {
+          alert(data.error || "取消失败：服务端拒绝执行");
+          return;
+        }
+        alert(data.message || "已成功取消");
         fetchJobs();
       } catch (err) {
-        alert("取消失败：" + err.message);
+        alert("请求取消失败：" + err.message);
       }
     }
 
@@ -920,7 +927,16 @@
         const resp = await fetch("/api/jobs");
         currentJobs = await resp.json();
         if (!selectedJobId && currentJobs.length > 0) {
-          selectedJobId = currentJobs[0].jobId;
+          const urlParams = new URLSearchParams(window.location.search);
+          const qJobId = urlParams.get("jobId");
+          if (qJobId && currentJobs.some((j) => j.jobId === qJobId)) {
+            selectedJobId = qJobId;
+          } else {
+            const activeTeamwork = currentJobs.find((j) => j.state === "running" && j.progress?.subagents?.length > 0)
+              || currentJobs.find((j) => j.state === "running")
+              || currentJobs[0];
+            selectedJobId = activeTeamwork.jobId;
+          }
         }
         renderTaskList();
         renderJobDetail();
@@ -939,7 +955,16 @@
         try {
           currentJobs = JSON.parse(e.data);
           if (!selectedJobId && currentJobs.length > 0) {
-            selectedJobId = currentJobs[0].jobId;
+            const urlParams = new URLSearchParams(window.location.search);
+            const qJobId = urlParams.get("jobId");
+            if (qJobId && currentJobs.some((j) => j.jobId === qJobId)) {
+              selectedJobId = qJobId;
+            } else {
+              const activeTeamwork = currentJobs.find((j) => j.state === "running" && j.progress?.subagents?.length > 0)
+                || currentJobs.find((j) => j.state === "running")
+                || currentJobs[0];
+              selectedJobId = activeTeamwork.jobId;
+            }
           }
           renderTaskList();
           renderJobDetail();
@@ -961,7 +986,12 @@
 
     function escapeHtml(str) {
       if (!str) return "";
-      return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
     }
 
     // 启动初始拉取与 SSE
