@@ -23,6 +23,11 @@ The bridge never invokes `--disable-slash-commands`. It uses AGY's required
 Per-job AGY logs are stored under `logs/` so a bridge response can be matched to
 the original backend error without scanning unrelated global CLI logs.
 
+Version 1.2.0 changes:
+
+- **Deep Cascade Subagent Inspection (God's-eye View)**: Recursively penetrates and parses independent subagent conversation transcripts for all spawned Workers (e.g. Worker A, Worker B, Victory Auditor). Exposes fine-grained execution steps (`step`), live micro-actions (`current_action`), active tools (`last_tool`), lifecycle statuses, and individual activity trails directly in the `subagents` list.
+- **Robust Subagent Parsing & Full-transcript Affinity**: Automatically prefers un-truncated `transcript_full.jsonl` and adds tolerant parser fallbacks for models producing raw unescaped newlines within JSON string arguments.
+
 Version 1.1.0 changes:
 
 - **Real-time Progress & Activity Tracking**: `get_gemini_task` poll responses now include a structured `progress` object detailing the current step number, active tool call, action summary, spawned subagents list, and recent activity stream, eliminating the "blind running" limitation.

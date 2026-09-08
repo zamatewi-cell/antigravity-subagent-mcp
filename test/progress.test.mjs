@@ -1,4 +1,4 @@
-﻿import assert from "node:assert/strict";
+import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -41,6 +41,11 @@ try {
     }),
     JSON.stringify({
       step_index: 2,
+      type: "GENERIC",
+      content: "Created the following subagents:\n{\n  \"conversationId\": \"11111111-2222-3333-4444-555555555555\"\n}\n{\n  \"conversationId\": \"66666666-7777-8888-9999-000000000000\"\n}",
+    }),
+    JSON.stringify({
+      step_index: 3,
       type: "PLANNER_RESPONSE",
       content: "正在检查后端核心逻辑",
       tool_calls: [
@@ -55,11 +60,13 @@ try {
   fs.writeFileSync(sampleTranscript, lines.join("\n"), "utf8");
 
   const parsed = parseTranscript(sampleTranscript);
-  assert.equal(parsed.currentStep, 2);
+  assert.equal(parsed.currentStep, 3);
   assert.equal(parsed.lastTool, "view_file");
   assert.equal(parsed.subagents.length, 2);
   assert.equal(parsed.subagents[0].role, "Worker A");
+  assert.equal(parsed.subagents[0].conversation_id, "11111111-2222-3333-4444-555555555555");
   assert.equal(parsed.subagents[1].role, "Worker B");
+  assert.equal(parsed.subagents[1].conversation_id, "66666666-7777-8888-9999-000000000000");
   assert.equal(parsed.recentActivities.length, 2);
 
   // 3. 测试从日志提取回退信息
