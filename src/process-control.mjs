@@ -144,13 +144,13 @@ export function isRetryablePreflightFailure(job) {
 }
 
 /**
- * 向运行中任务的子进程 stdin 管道安全写入交互指令（Human-in-the-loop）
- * 防护 EPIPE 崩溃，确保写入换行符闭合，并返回写入字节数
+ * 向运行中任务的子进程 stdin 管道安全写入交互指令（Human-in-the-loop 实验性通道）
+ * 异步防护 EPIPE 崩溃，通过写入回调确认物理完成，并确保换行符闭合
  * @param {object} job - 任务对象
  * @param {string} input - 待写入的指令或文本
- * @returns {{ success: true, jobId: string, bytesWritten: number }}
+ * @returns {Promise<{ success: true, jobId: string, bytesWritten: number, flushed: boolean }>}
  */
-export function sendInputToJob(job, input) {
+export async function sendInputToJob(job, input) {
   if (!job || job.state !== "running") {
     const error = new Error("Job is not running or stdin is closed");
     error.code = "JOB_NOT_RUNNING";
@@ -163,7 +163,7 @@ export function sendInputToJob(job, input) {
     throw error;
   }
 
-  // 绑定 error 监听器防护 EPIPE 崩溃
+  // 绑定持久化 error 监听器防护未捕获 EPIPE 导致宿主进程崩溃
   if (!job.child.stdin.__epipeProtected) {
     job.child.stdin.on("error", () => {
       // 捕获 EPIPE 等异步管道破裂错误，防止未捕获异常导致 Node 进程崩溃
@@ -175,16 +175,46 @@ export function sendInputToJob(job, input) {
   const formatted = raw.endsWith("\n") ? raw : `${raw}\n`;
   const bytesWritten = Buffer.byteLength(formatted, "utf8");
 
-  try {
-    job.child.stdin.write(formatted);
-    return {
-      success: true,
-      jobId: job.jobId,
-      bytesWritten,
+  return new Promise((resolve, reject) => {
+    let completed = false;
+    const onceError = (err) => {
+      if (!completed) {
+        completed = true;
+        const error = new Error(err?.message || "Write to child stdin failed");
+        error.code = err?.code || "WRITE_FAILED";
+        reject(error);
+      }
     };
-  } catch (err) {
-    const error = new Error("Job is not running or stdin is closed");
-    error.code = err.code || "WRITE_FAILED";
-    throw error;
-  }
+
+    job.child.stdin.once("error", onceError);
+
+    try {
+      const flushed = job.child.stdin.write(formatted, "utf8", (err) => {
+        job.child.stdin.removeListener("error", onceError);
+        if (completed) return;
+        completed = true;
+        if (err) {
+          const error = new Error(err.message || "Write to child stdin failed");
+          error.code = err.code || "WRITE_FAILED";
+          reject(error);
+        } else {
+          resolve({
+            success: true,
+            jobId: job.jobId,
+            bytesWritten,
+            flushed,
+          });
+        }
+      });
+    } catch (err) {
+      job.child.stdin.removeListener("error", onceError);
+      if (!completed) {
+        completed = true;
+        const error = new Error(err.message || "Write to child stdin failed");
+        error.code = err.code || "WRITE_FAILED";
+        reject(error);
+      }
+    }
+  });
 }
+

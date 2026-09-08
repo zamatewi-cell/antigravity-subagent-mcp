@@ -108,7 +108,7 @@ async function runTests() {
     const postRes = await new Promise((resolve, reject) => {
       const req = http.request({
         hostname: "localhost",
-        port: 13726,
+        port: dashboardInstance.port,
         path: `/api/jobs/${testJobInDash.jobId}/cancel`,
         method: "POST",
       }, (res) => {
@@ -155,7 +155,7 @@ async function runTests() {
     const postRes = await new Promise((resolve, reject) => {
       const req = http.request({
         hostname: "localhost",
-        port: 13727,
+        port: standaloneInstance.port,
         path: `/api/jobs/${fakeStandaloneJob.jobId}/cancel`,
         method: "POST",
       }, (res) => {
@@ -190,7 +190,7 @@ async function runTests() {
   fs.writeFileSync(path.join(jobsDir, `${fakeQueuedStandaloneJob.jobId}.json`), JSON.stringify(fakeQueuedStandaloneJob));
 
   const standaloneQueuedInstance = await startDashboardServer({
-    port: 13727,
+    port: 13728, // 采用独立端口避免与上一个实例的操作系统 TIME_WAIT 端口冲突
     memoryJobs: null, // 独立看板模式
     autoOpen: false,
   });
@@ -199,7 +199,7 @@ async function runTests() {
     const postQueuedRes = await new Promise((resolve, reject) => {
       const req = http.request({
         hostname: "localhost",
-        port: 13727,
+        port: standaloneQueuedInstance.port, // 必须使用实际监听端口
         path: `/api/jobs/${fakeQueuedStandaloneJob.jobId}/cancel`,
         method: "POST",
       }, (res) => {

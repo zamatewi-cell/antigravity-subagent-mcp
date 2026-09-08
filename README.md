@@ -26,19 +26,21 @@ the original backend error without scanning unrelated global CLI logs.
 Version 1.4.0 changes:
 
 - **Historical Jobs Pagination & Multidimensional Filtering (R1)**:
-  - Added full query parameter parsing to `GET /api/jobs` supporting `page` (default: 1), `limit` (default: 20, clamp: 1-100), `state` exact filtering, and `search` case-insensitive substring search matching prompt and job ID.
+  - Added query parameter parsing to `GET /api/jobs` supporting `page` (default: 1), `limit` (default: 20, clamped to 1-100), `state` exact filtering, and `search` substring search matching prompt and job ID.
   - Standardized paginated response structure `{ data: Job[], pagination: { total, page, limit, totalPages, hasMore } }` with transparent backward-compatibility for unparameterized requests.
-  - Applied in-memory LRU slicing to eliminate redundant disk deserialization of 100+ jobs.
-- **Fine-Grained SSE Delta Event Streaming & Frontend Delta Patching (R2)**:
-  - Re-architected `GET /api/stream` to dispatch initial `snapshot` with incrementing cursor `seq`, followed by fine-grained differential events (`job_created`, `job_updated`, `job_removed`) or lightweight `:keep-alive` comments during idle intervals.
+  - Slices memory/LRU indices prior to `formatJobDetail` to eliminate redundant formatting, log tail reading, and transcript serialization for off-screen historical jobs.
+- **Single-Job Replacement SSE Event Streaming & Lightweight Snapshots (R2)**:
+  - Re-architected `GET /api/stream` to dispatch initial lightweight `snapshot` (all active jobs + recent 20 terminal jobs, offloading deep history to REST pagination) with incrementing cursor `seq`.
+  - Upgraded differential change detection from full-list broadcast to single-job entity replacement (`job_created`, `job_updated`, `job_removed`), sending lightweight `:keep-alive` comments during idle intervals.
+  - Hardened `getJobFingerprint` to deeply serialize subagent status, step, current action, last tool, and topology tree, ensuring subagent-only micro-activities immediately trigger live streaming updates.
   - Implemented client-side memory dictionary (`jobsById`) with surgical DOM patching in `index.html`, eliminating layout thrashing and focus drops from full-page `innerHTML` rebuilds.
-  - Fixed offline reconnection edge case via continuous `eventHistory` circular buffer tracking and automatic snapshot fallback.
 - **Native Zero-Dependency SVG Agent DAG Topology (R3)**:
   - Augmented recursive agent tree assembly with directional topological metadata (`parentId`, `depth`, `childrenIds`, `nodeType`).
   - Rendered compact hierarchical DAG visualizer using a dual-layer architecture: underlying SVG cubic Bézier flowing wires with pure CSS hardware-accelerated neon breathing keyframes (`wireFlow`, `wireBreath`), and top-layer absolute HTML interactive cards.
-- **Human-in-the-loop (HITL) Soft Intervention Pipeline (R4)**:
-  - Configured child process spawn with `stdio: ["pipe", "pipe", "pipe"]` and implemented safe `sendInputToJob` with newline auto-completion and EPIPE crash guard.
-  - Exposed local-origin/Host protected `POST /api/jobs/:id/interact` endpoint and integrated responsive web console with quick approval shortcuts (`[Y]`, `[N]`, `[Enter]`) and live audit logging.
+- **Experimental Human-in-the-loop (HITL) Soft Intervention Pipeline (R4)**:
+  - Configured child process spawn with `stdio: ["pipe", "pipe", "pipe"]` as an experimental bidirectional stream channel designed for stream protocol interactions (`--input-format stream-json`).
+  - Implemented asynchronous `sendInputToJob` with physical write confirmation callbacks, newline auto-completion, and robust EPIPE / pipe-destruction crash guards.
+  - Exposed local-origin/Host protected `POST /api/jobs/:id/interact` endpoint with 64 KiB request body truncation (HTTP 413 Payload Too Large) and integrated web console shortcuts (`[Y]`, `[N]`, `[Enter]`).
 
 Version 1.3.3 changes:
 

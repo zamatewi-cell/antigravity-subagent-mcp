@@ -140,9 +140,21 @@ export function startDashboardServer(options = {}) {
       : (job.progress && typeof job.progress === "object" && job.progress.phase
           ? job.progress
           : getTaskProgress(job));
-    const subagentsCount = progress?.subagents?.length || 0;
+
+    // 稳定化子代理微观指纹（精准捕获 ID、状态流转、步数推进、动作切换、工具调用、拓扑链）
+    const subagentsFingerprint = (progress?.subagents || [])
+      .map(s => {
+        const id = s.conversation_id || s.id || "";
+        const children = Array.isArray(s.childrenIds) ? s.childrenIds.slice().sort().join(",") : "";
+        return `${id}:${s.status || ""}:${s.step || 0}:${s.current_action || ""}:${s.last_tool || ""}:${s.parentId || ""}:[${children}]`;
+      })
+      .sort()
+      .join(";");
+
     const actsCount = progress?.recent_activities?.length || 0;
-    return `${job.state}|${job.completedAt || ""}|${progress?.current_step || 0}|${progress?.phase || ""}|${progress?.current_action || ""}|${progress?.last_tool || ""}|${subagentsCount}|${actsCount}|${job.attempts || 1}|${job.cancelRequested ? 1 : 0}`;
+    const lastAct = actsCount > 0 ? progress.recent_activities[actsCount - 1] : "";
+
+    return `${job.state}|${job.completedAt || ""}|${progress?.current_step || 0}|${progress?.phase || ""}|${progress?.current_action || ""}|${progress?.last_tool || ""}|${subagentsFingerprint}|${actsCount}:${lastAct}|${job.attempts || 1}|${job.cancelRequested ? 1 : 0}`;
   }
 
   // 初始化指纹表
@@ -451,12 +463,26 @@ export function startDashboardServer(options = {}) {
         return;
       }
 
+      const MAX_BODY_BYTES = 64 * 1024; // 64 KiB 上限
+      let bodyBytes = 0;
       let bodyStr = "";
+      let isTooLarge = false;
+
       req.on("data", (chunk) => {
+        if (isTooLarge) return;
+        bodyBytes += chunk.length;
+        if (bodyBytes > MAX_BODY_BYTES) {
+          isTooLarge = true;
+          res.writeHead(413, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ error: "Payload Too Large: input exceeds 64 KiB limit", code: "PAYLOAD_TOO_LARGE" }));
+          req.destroy();
+          return;
+        }
         bodyStr += chunk.toString("utf8");
       });
 
-      req.on("end", () => {
+      req.on("end", async () => {
+        if (isTooLarge) return;
         try {
           let body = {};
           if (bodyStr.trim()) {
@@ -476,12 +502,14 @@ export function startDashboardServer(options = {}) {
           }
 
           try {
-            const sendResult = sendInputToJob(job, body.input);
+            const sendResult = await sendInputToJob(job, body.input);
             res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
             res.end(JSON.stringify({
               success: true,
               jobId,
               bytesWritten: sendResult.bytesWritten,
+              flushed: sendResult.flushed,
+              experimental: true,
             }));
           } catch (err) {
             res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
@@ -529,12 +557,35 @@ export function startDashboardServer(options = {}) {
         }
       }
 
-      // 3. 若非增量重放，立即推送首屏快照（携带 seq 与 jobs）
+      // 3. 若非增量重放，立即推送轻量首屏快照（活跃任务 + 最近 20 个终态任务，杜绝大包冲击）
       if (!replayed) {
         const all = getAllJobs();
-        all.sort((a, b) => new Date(b.startedAt || 0).getTime() - new Date(a.startedAt || 0).getTime());
-        const payload = all.map(formatJobDetail);
-        safeSendEvent(res, "snapshot", { seq: currentSeq, jobs: payload }, currentSeq);
+        const activeJobs = [];
+        const terminalJobs = [];
+
+        for (const job of all) {
+          if (["running", "queued", "stopping", "retrying"].includes(job.state)) {
+            activeJobs.push(job);
+          } else {
+            terminalJobs.push(job);
+          }
+        }
+
+        // 终态任务按启动时间倒序排列，仅截取最近 20 个
+        terminalJobs.sort((a, b) => new Date(b.startedAt || 0).getTime() - new Date(a.startedAt || 0).getTime());
+        const recentTerminal = terminalJobs.slice(0, 20);
+
+        // 合并活跃任务与近期终态任务并按启动时间倒序
+        const snapshotJobs = [...activeJobs, ...recentTerminal];
+        snapshotJobs.sort((a, b) => new Date(b.startedAt || 0).getTime() - new Date(a.startedAt || 0).getTime());
+
+        const payload = snapshotJobs.map(formatJobDetail);
+        safeSendEvent(res, "snapshot", {
+          seq: currentSeq,
+          jobs: payload,
+          totalKnownJobs: all.length,
+          recentTerminalLimit: 20,
+        }, currentSeq);
       }
 
       req.on("close", () => {

@@ -138,6 +138,51 @@ try {
   assert.equal(updateEvt.data.patch.progress.current_action, "正在运行单元测试套件");
   console.log("  -> PASS: job_updated 增量推送准确，变动字段精确对齐");
 
+  // 3.1 反例测试：父任务各项完全静止，子代理数量与步数保持不变，仅变更子代理内部 current_action
+  console.log("\n[Test 3.1] 模拟父任务完全静止，仅子代理内部动作切换 (view_file -> run_command)...");
+  targetJob.progress = {
+    phase: "executing_tools",
+    current_step: 2,
+    current_action: "等待 Worker 处理中",
+    subagents: [
+      {
+        conversation_id: "worker-conv-1",
+        role: "Worker A",
+        status: "running",
+        step: 10,
+        current_action: "正在读取配置文件 config.json",
+        last_tool: "view_file",
+        parentId: null,
+        childrenIds: [],
+      }
+    ],
+    recent_activities: ["Step 2: 等待 Worker 处理中"],
+  };
+  // 先触发一次同步，让系统记录基准指纹
+  await new Promise((r) => setTimeout(r, 1200));
+  const client1EventsLenBefore = client1.events.length;
+
+  // 关键测试动作：父任务属性全部保持不变，子代理数量与 step=10 保持不变，仅变更子代理的 current_action
+  targetJob.progress.subagents[0].current_action = "正在编译核心源码 (run_command)";
+  targetJob.progress.subagents[0].last_tool = "run_command";
+
+  await new Promise((r) => setTimeout(r, 1200));
+  const subagentActionUpdateEvt = client1.events.slice(client1EventsLenBefore).find(e => e.type === "job_updated");
+  assert(subagentActionUpdateEvt, "父任务静止但子代理动作变更时，服务端必须能够检测到并广播 job_updated！");
+  assert.equal(subagentActionUpdateEvt.data.patch.progress.subagents[0].current_action, "正在编译核心源码 (run_command)");
+  console.log("  -> PASS: 子代理内部微观动作变更成功穿透指纹并触发 job_updated");
+
+  // 3.2 反例测试：子代理状态由 running 终结为 completed
+  console.log("\n[Test 3.2] 模拟子代理状态终结流转 (running -> completed)...");
+  const client1EventsLenBeforeStatus = client1.events.length;
+  targetJob.progress.subagents[0].status = "completed";
+
+  await new Promise((r) => setTimeout(r, 1200));
+  const subagentStatusUpdateEvt = client1.events.slice(client1EventsLenBeforeStatus).find(e => e.type === "job_updated");
+  assert(subagentStatusUpdateEvt, "子代理状态流转终结时，服务端必须广播 job_updated！");
+  assert.equal(subagentStatusUpdateEvt.data.patch.progress.subagents[0].status, "completed");
+  console.log("  -> PASS: 子代理状态流转成功触发 job_updated");
+
   // 4. 模拟新增与删除任务
   console.log("\n[Test 4] 模拟新增任务与删除任务广播...");
   const newJobId = "job-created-002";
@@ -189,8 +234,51 @@ try {
   Object.assign(patchedJob, updateEvt.data.patch);
   assert.equal(patchedJob.progress.current_step, 2);
   assert.equal(patchedJob.progress.current_action, "正在运行单元测试套件");
-  console.log("  -> PASS: 客户端局部打补丁后数据状态与服务端 100% 吻合");
+  // 7. 验证超多历史任务时，首屏快照轻量截断（活跃任务 + 最近 20 个终态任务）
+  console.log("\n[Test 7] 验证大量历史任务时，首屏快照轻量截断 (活跃任务 + 最近 20 个终态任务)...");
+  // 注入 25 个终态历史任务
+  for (let i = 1; i <= 25; i++) {
+    const termId = `job-terminal-hist-${String(i).padStart(3, "0")}`;
+    testMemoryJobs.set(termId, {
+      jobId: termId,
+      state: i % 2 === 0 ? "success" : "error",
+      startedAt: new Date(Date.now() - (30 - i) * 60000).toISOString(),
+      completedAt: new Date(Date.now() - (30 - i) * 60000 + 10000).toISOString(),
+      invocation: { prompt: `历史终态任务 ${i}` },
+      attempts: 1,
+    });
+  }
 
+  // 另外确保有 2 个处于活跃态的任务
+  testMemoryJobs.set("job-active-001", {
+    jobId: "job-active-001",
+    state: "running",
+    startedAt: new Date().toISOString(),
+    invocation: { prompt: "活跃任务 1" },
+    attempts: 1,
+  });
+  testMemoryJobs.set("job-active-002", {
+    jobId: "job-active-002",
+    state: "queued",
+    startedAt: new Date().toISOString(),
+    invocation: { prompt: "活跃任务 2" },
+    attempts: 1,
+  });
+
+  const partialClient = createSSEClient();
+  await new Promise((r) => setTimeout(r, 400));
+  const snapEvt = partialClient.events.find(e => e.type === "snapshot");
+  assert(snapEvt, "新连接必须收到快照事件");
+  assert.equal(snapEvt.data.recentTerminalLimit, 20);
+  assert(snapEvt.data.totalKnownJobs >= 27, "总任务数记录准确");
+  // 活跃任务数：2 个新加 + 原有 running 任务 = 3 个；终态任务截断为 20 个；总快照任务数不超过 23 个（而非全量 28 个）
+  const returnedActive = snapEvt.data.jobs.filter(j => ["running", "queued"].includes(j.state));
+  const returnedTerminal = snapEvt.data.jobs.filter(j => !["running", "queued"].includes(j.state));
+  assert.equal(returnedTerminal.length, 20, "终态任务快照必须严格截断为最近 20 条，杜绝全量大包");
+  assert(returnedActive.length >= 2, "所有活跃任务必须全部完整包含在首屏快照中");
+  console.log("  -> PASS: SSE 首屏快照轻量化截断验证通过（活跃全量 + 终态最近 20 条）");
+
+  partialClient.close();
   reconnectClient.close();
   console.log("\n[All Tests Passed] SSE 增量事件广播与客户端同步验证 100% 成功！\n");
 } finally {

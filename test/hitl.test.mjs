@@ -98,18 +98,18 @@ try {
   // =========================================================================
   // Test 1: 底层 sendInputToJob 逻辑与换行符闭合验证
   // =========================================================================
-  console.log("\n[Test 1] 验证底层 sendInputToJob 接口功能与换行符自动补全...");
-  const res1 = sendInputToJob(mockRunning.job, "y");
+  console.log("\n[Test 1] 验证底层 sendInputToJob 异步接口与换行符自动补全...");
+  const res1 = await sendInputToJob(mockRunning.job, "y");
   assert.equal(res1.success, true);
   assert.equal(res1.jobId, mockRunning.job.jobId);
   assert.equal(res1.bytesWritten, 2, "字符串 'y' 自动补 \\n 后字节数应为 2");
   assert.equal(mockRunning.getReceivedData(), "y\n", "stdin 必须准确接收到补全换行符的内容");
 
   // 再次写入已带换行符的输入，避免重复追加换行
-  const res2 = sendInputToJob(mockRunning.job, "already-has-newline\n");
+  const res2 = await sendInputToJob(mockRunning.job, "already-has-newline\n");
   assert.equal(res2.success, true);
   assert.equal(mockRunning.getReceivedData(), "y\nalready-has-newline\n");
-  console.log("  -> PASS: sendInputToJob 数据安全写入与换行符补全机制正确");
+  console.log("  -> PASS: sendInputToJob 异步数据安全写入与换行符补全机制正确");
 
   // =========================================================================
   // Test 2: HTTP POST /api/jobs/:id/interact 正常交互
@@ -122,6 +122,7 @@ try {
   const data1 = JSON.parse(httpResp1.body);
   assert.equal(data1.success, true);
   assert.equal(data1.jobId, mockRunning.job.jobId);
+  assert.equal(data1.experimental, true, "接口响应必须如实标注 experimental 实验性状态");
   assert(data1.bytesWritten > 0);
   assert(mockRunning.getReceivedData().includes("npm run build\n"));
   console.log("  -> PASS: 正常交互指令 200 响应并成功注入子进程 stdin");
@@ -194,12 +195,46 @@ try {
   // 主动销毁流模拟底层子进程先一步退出
   destroyedJob.stdinStream.destroy();
 
-  assert.throws(
-    () => sendInputToJob(destroyedJob.job, "hello"),
+  await assert.rejects(
+    async () => await sendInputToJob(destroyedJob.job, "hello"),
     /Job is not running or stdin is closed/,
-    "已销毁的 stdin 管道必须抛出受检错误而非 uncaughtException"
+    "已销毁的 stdin 管道必须异步抛出受检错误而非 uncaughtException"
   );
   console.log("  -> PASS: EPIPE 与管道关闭崩溃防护机制验证通过");
+
+  // =========================================================================
+  // Test 8: 64 KiB 请求体超限拦截防御 (413 Payload Too Large)
+  // =========================================================================
+  console.log("\n[Test 8] 验证 64 KiB 请求体大小上限防御 (413 Payload Too Large)...");
+  const hugePayload = "A".repeat(65 * 1024); // 65 KiB
+  const respTooLarge = await httpPost(`${dashboard.url}/api/jobs/${mockRunning.job.jobId}/interact`, {
+    input: hugePayload,
+  });
+  assert.equal(respTooLarge.statusCode, 413, "超出 64 KiB 的超大输入必须返回 413");
+  const tooLargeData = JSON.parse(respTooLarge.body);
+  assert.equal(tooLargeData.code, "PAYLOAD_TOO_LARGE");
+  console.log("  -> PASS: 64 KiB 请求体安全截断与 413 拦截验证通过");
+
+  // =========================================================================
+  // Test 9: 异步物理写入确认与错误拒绝机制
+  // =========================================================================
+  console.log("\n[Test 9] 验证底层 write 失败时异步正确 reject 绝不假成功...");
+  const errorJob = createMockJob("job-error-005", "running");
+  // 模拟底层流写入回调报错
+  errorJob.job.child.stdin.write = (data, enc, cb) => {
+    process.nextTick(() => {
+      const err = new Error("Broken pipe simulation");
+      err.code = "EPIPE";
+      cb(err);
+    });
+    return false;
+  };
+  await assert.rejects(
+    async () => await sendInputToJob(errorJob.job, "failing-data"),
+    /Broken pipe simulation/,
+    "底层 write 报错时 sendInputToJob 必须拒绝 Promise 绝不能假返回 success"
+  );
+  console.log("  -> PASS: 物理写入异步错误正确拒绝，彻底杜绝假成功");
 
   console.log("\n[All Tests Passed] R4 Human-in-the-loop 软介入通信管道单测 100% 全部通过！\n");
 } finally {

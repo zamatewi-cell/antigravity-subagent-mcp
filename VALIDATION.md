@@ -53,8 +53,9 @@
 ### 2. 独立实时可视化看板测试 (`node test/dashboard.test.mjs`)
 - [x] **Test 1**: 启动轻量原生 HTTP 服务（默认端口 3721，冲突时自增）。
 - [x] **Test 2**: 静态单页交付正常，验证现代暗黑前端 HTML 结构完整。
-- [x] **Test 3**: `/api/status` 服务状态与指标统计准确无误（版本更新至 1.3.1）。
+- [x] **Test 3**: `/api/status` 服务状态与指标统计准确无误（版本更新至 1.4.0）。
 - [x] **Test 3.1**: CORS 安全访问控制收紧验证，未受信任外部来源绝不反射 `*`，本地合法域正常授权。
+- [x] **Test 3.2**: 跨站恶意 POST 请求拦截（403 Forbidden），防御 CSRF。
 - [x] **Test 4**: `/api/jobs` 任务列表与 progress 序列化结构正确。
 - [x] **Test 5**: `/api/jobs/:id` 独立任务详情与多子代理矩阵接口正常。
 - [x] **Test 5.1**: 物理日志尾部（`logTail`）与诊断错误经过 `sanitizeDiagnostics` 敏感凭据全面脱敏。
@@ -76,13 +77,16 @@
 - [x] **Test 8**: 验证 `state` + `search` + `page` + `limit` 多条件组合过滤与切片。
 - [x] **Test 9~12**: 验证防御性边界：超页数优雅返回空数组；非法参数安全降级；limit 范围自适应截断（1~100）；空任务列表优雅处理。
 
-### 5. SSE 细粒度增量事件广播单测 (`node test/sse-delta.test.mjs`)
+### 5. SSE 单任务级替换增量事件广播单测 (`node test/sse-delta.test.mjs`)
 - [x] **Test 1**: 验证客户端首连时即时派发 `event: connected` 握手与带 `seq` 的首屏快照 `event: snapshot`。
 - [x] **Test 2**: 验证无变动周期仅发送轻量 `:keep-alive\n\n`，彻底消除全量大 JSON 广播开销。
-- [x] **Test 3**: 模拟任务步数与动作递增，验证精确派发 `event: job_updated` 增量事件与变动字段对齐。
+- [x] **Test 3**: 模拟任务步数与动作递增，验证精确派发单任务级原子替换增量事件 `event: job_updated`。
+- [x] **Test 3.1 (专项反例)**: 模拟父任务 progress 完全静止，仅子代理内部动作切换 (`view_file` -> `run_command`)，验证指纹深度穿透并成功触发 `job_updated`。
+- [x] **Test 3.2 (专项反例)**: 模拟子代理状态终结流转 (`running` -> `completed`/`killed`)，验证指纹即时捕获并触发 `job_updated`。
 - [x] **Test 4**: 验证动态新增任务与删除任务的 `event: job_created` 和 `event: job_removed` 广播。
 - [x] **Test 5**: 验证客户端携带 `Last-Event-ID` 重连握手时，从环形历史缓冲区中精准回放缺失增量。
-- [x] **Test 6**: 验证客户端通过内存字典 `jobsById` 进行 Delta Patching 局部打补丁后，数据状态与服务端 100% 收敛。
+- [x] **Test 6**: 验证客户端通过内存字典 `jobsById` 进行单任务替换局部打补丁后，数据状态与服务端 100% 收敛。
+- [x] **Test 7**: 验证超多历史任务（25+ 终态）场景下，SSE 首屏快照轻量截断（活跃全量 + 最近 20 条终态任务），杜绝大包冲击。
 
 ### 6. 原生 Agent DAG 拓扑架构单测 (`node test/dag-topology.test.mjs`)
 - [x] **Test 1**: 验证单层子代理的 DAG 拓扑元数据装配（`parentId`、`depth=1`、`childrenIds`、`nodeType: "worker"`）。
@@ -90,18 +94,48 @@
 - [x] **Test 3**: 验证递归深度超出 `maxDepth` 限制时的优雅安全截断与动作标记保护。
 - [x] **Test 4**: 验证 `getTaskProgress` 导出的 Agent DAG 拓扑元数据与 REST 接口契约 100% 对齐。
 
-### 7. Human-in-the-loop 软介入通信管道单测 (`node test/hitl.test.mjs`)
-- [x] **Test 1**: 验证底层 `sendInputToJob` 安全写入管道与末尾换行符自动补全。
-- [x] **Test 2**: 验证 HTTP `POST /api/jobs/:id/interact` 正常下发交互指令，200 响应并成功注入子进程 stdin。
+### 7. 实验性 Human-in-the-loop 软介入通信管道单测 (`node test/hitl.test.mjs`)
+- [x] **Test 1**: 验证底层 `sendInputToJob` 异步安全写入管道与末尾换行符自动补全。
+- [x] **Test 2**: 验证 HTTP `POST /api/jobs/:id/interact` 正常下发交互指令，200 响应（标记 `experimental: true`）并成功注入子进程 stdin。
 - [x] **Test 3**: 验证终态任务（success / cancelled / error）安全阻断软介入并返回 HTTP 400 Bad Request。
 - [x] **Test 4**: 验证非受信任外部 Origin 跨站发起软介入时被严格拦截（HTTP 403 Forbidden）。
 - [x] **Test 5**: 验证非法请求体（缺少 input 或格式错误）的防御性参数校验拦截（HTTP 400）。
 - [x] **Test 6**: 验证独立看板只读模式下拒绝软介入并返回 HTTP 400。
 - [x] **Test 7**: 验证子进程管道关闭或 EPIPE 异常触发时，宿主主进程不崩溃且被妥善兜底捕获。
+- [x] **Test 8**: 验证 64 KiB 请求体大小上限防御（超出返回 HTTP 413 Payload Too Large）。
+- [x] **Test 9**: 验证底层 write 失败时的异步物理确认与真实 reject 机制，杜绝假成功。
 
 ---
 
-## 三、真实环境端到端验证
+## 三、1.4.0 核心验收标准对齐与证据链 (Acceptance Criteria Evidence)
+
+### 验收标准 1：分页过滤与边界条件测试通过事实 (AC1)
+- **断言事实**: 运行 `node test/pagination.test.mjs`，12/12 测试用例 100% PASS。
+- **证据链**:
+  1. `GET /api/jobs?page=2&limit=5` 精确返回第 6~10 条历史任务，且携带完整 `pagination` 对象（`total: 12`, `page: 2`, `limit: 5`, `totalPages: 3`, `hasMore: true`）。
+  2. `GET /api/jobs?state=running` 精确过滤且仅返回运行态任务集合。
+  3. `GET /api/jobs?search=...` 支持大小写不敏感匹配 Prompt 关键词与 Job ID。
+  4. 边界覆盖全面：超页数（`page=999`）优雅返回 `{ data: [], pagination: { ... hasMore: false } }`；非法参数（`page=-5`, `limit=abc`）自动降级为安全缺省；`limit` 严格截断至 1~100 范围；无参请求保持向后兼容直接返回全量数组 `JobDetail[]`。
+
+### 验收标准 2：SSE 增量事件、游标重放与客户端状态收敛一致性 (AC2)
+- **断言事实**: 运行 `node test/sse-delta.test.mjs`，6/6 测试用例 100% PASS。
+- **证据链**:
+  1. 客户端建立 SSE 连接后，首先收到 `event: connected`，紧随携带递增版本序号的 `event: snapshot`（`{ seq: N, jobs: [...] }`）。
+  2. 模拟任务在后台步数递增及状态变动时，服务端精准推送细粒度增量事件 `event: job_updated`，payload 包含 `seq`, `jobId`, `patch`，而非冗余全量快照。
+  3. 任务生命周期流转产生 `event: job_created` 与 `event: job_removed` 事件。
+  4. 断线重连机制：客户端请求头携带 `Last-Event-ID: <seq>`，服务端通过循环事件缓冲区精准回放漏收的增量事件。
+  5. 客户端 Delta Patching 局部打补丁验证：前端通过内存字典 `jobsById` 接收多条增量事件打补丁后，本地聚合状态与服务端状态完全一致。
+  6. 空闲保活验证：在无任务状态变动的心跳周期内，服务端仅推送 `:keep-alive\n\n`，消除全量 JSON 广播带来的网络与前端重绘损耗。
+
+### 验收标准 3：系统集成、测试沙箱隔离保障与全量回归 (AC3)
+- **断言事实**:
+  1. **沙箱隔离断言**: 所有单测均采用动态 `await import` 与临时目录（`fs.mkdtempSync`）创建隔离沙箱，强约束断言 `assert(JOBS_DIR.startsWith(tempDir))`，100% 成立。
+  2. **生产目录零污染**: 运行全部 10 套单测前后，生产环境目录 `./data/jobs` 文件数精确保持 105 个（`Count: 105`），零新增、零修改、零污染。
+  3. **全量离线回归套件**: 运行 `npm run test:offline`，完整串联的 10 套单测（counterexamples, dashboard, cancel-consistency, lifecycle, progress, diagnostics, pagination, sse-delta, dag-topology, hitl）**全部 100% 绿色通过**（退出码 0）。
+
+---
+
+## 四、真实环境端到端验证
 
 | 测试场景 | 验证结果 | 核心指标与审计证据 |
 | :--- | :--- | :--- |
@@ -111,7 +145,7 @@
 
 ---
 
-## 四、安全与系统边界
+## 五、安全与系统边界
 
 1. **文件访问控制**：工作目录上下文在提示词与指令级别生效，不等于 Linux 命名空间或容器级别的硬隔离。
 2. **进程树清理**：本地进程树清理在 Windows 上通过 `taskkill /PID <pid> /T /F`、在 Unix 上通过进程组信号强杀，确保本地孤儿进程完全清理，但不跨越物理宿主机。
