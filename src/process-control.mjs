@@ -142,3 +142,49 @@ export function isRetryablePreflightFailure(job) {
   return job.state === "error" && !job.cancelRequested &&
     job.preflightConfirmed === true && ["EAGAIN", "EBUSY"].includes(job.spawnErrorCode);
 }
+
+/**
+ * 向运行中任务的子进程 stdin 管道安全写入交互指令（Human-in-the-loop）
+ * 防护 EPIPE 崩溃，确保写入换行符闭合，并返回写入字节数
+ * @param {object} job - 任务对象
+ * @param {string} input - 待写入的指令或文本
+ * @returns {{ success: true, jobId: string, bytesWritten: number }}
+ */
+export function sendInputToJob(job, input) {
+  if (!job || job.state !== "running") {
+    const error = new Error("Job is not running or stdin is closed");
+    error.code = "JOB_NOT_RUNNING";
+    throw error;
+  }
+
+  if (!job.child || !job.child.stdin || job.child.stdin.destroyed || !job.child.stdin.writable) {
+    const error = new Error("Job is not running or stdin is closed");
+    error.code = "STDIN_NOT_WRITABLE";
+    throw error;
+  }
+
+  // 绑定 error 监听器防护 EPIPE 崩溃
+  if (!job.child.stdin.__epipeProtected) {
+    job.child.stdin.on("error", () => {
+      // 捕获 EPIPE 等异步管道破裂错误，防止未捕获异常导致 Node 进程崩溃
+    });
+    job.child.stdin.__epipeProtected = true;
+  }
+
+  const raw = String(input ?? "");
+  const formatted = raw.endsWith("\n") ? raw : `${raw}\n`;
+  const bytesWritten = Buffer.byteLength(formatted, "utf8");
+
+  try {
+    job.child.stdin.write(formatted);
+    return {
+      success: true,
+      jobId: job.jobId,
+      bytesWritten,
+    };
+  } catch (err) {
+    const error = new Error("Job is not running or stdin is closed");
+    error.code = err.code || "WRITE_FAILED";
+    throw error;
+  }
+}

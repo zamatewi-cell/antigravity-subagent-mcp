@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { exec } from "node:child_process";
 import { restorePersistedJobs, persistJob, loadPersistedJobsRaw, JOBS_DIR } from "./storage.mjs";
 import { getTaskProgress } from "./progress.mjs";
-import { cancelJob } from "./process-control.mjs";
+import { cancelJob, sendInputToJob } from "./process-control.mjs";
 import { sanitizeDiagnostics } from "./diagnostics.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -14,7 +14,7 @@ const WEB_ROOT = path.resolve(__dirname, "web");
 const HTML_FILE = path.join(WEB_ROOT, "index.html");
 
 const DEFAULT_PORT = Number(process.env.ANTIGRAVITY_DASHBOARD_PORT) || 3721;
-const DASHBOARD_VERSION = "1.3.3";
+const DASHBOARD_VERSION = "1.4.0";
 
 // 物理日志读取尾部内存缓存：logFile -> { mtimeMs, size, tail }，避免每秒重复打开同步读取
 const logTailCache = new Map();
@@ -31,9 +31,13 @@ export function formatJobDetail(job) {
   const isTerminal = ["completed", "success", "error", "cancelled", "interrupted"].includes(job.state);
   let progress = isTerminal && job._cachedProgress ? job._cachedProgress : null;
   if (!progress) {
-    progress = getTaskProgress(job);
-    if (isTerminal) {
-      job._cachedProgress = progress;
+    if (job.progress && typeof job.progress === "object" && job.progress.phase) {
+      progress = job.progress;
+    } else {
+      progress = getTaskProgress(job);
+      if (isTerminal) {
+        job._cachedProgress = progress;
+      }
     }
   }
 
@@ -82,13 +86,13 @@ export function formatJobDetail(job) {
     attempts: job.attempts || 1,
     result: job.result || null,
     progress: {
-      phase: progress.phase,
-      current_step: progress.current_step,
-      current_action: progress.current_action,
-      last_tool: progress.last_tool,
-      conversation_id: progress.conversation_id,
-      subagents: progress.subagents || [],
-      recent_activities: progress.recent_activities || [],
+      phase: progress?.phase || "UNKNOWN",
+      current_step: progress?.current_step || 0,
+      current_action: progress?.current_action || "",
+      last_tool: progress?.last_tool || null,
+      conversation_id: progress?.conversation_id || null,
+      subagents: progress?.subagents || [],
+      recent_activities: progress?.recent_activities || [],
     },
     logTail,
   };
@@ -123,6 +127,64 @@ export function startDashboardServer(options = {}) {
   const desiredPort = options.port || DEFAULT_PORT;
   const memoryJobs = options.memoryJobs || null;
   const sseClients = new Set();
+  let currentSeq = 1;
+  const lastJobFingerprints = new Map();
+  const eventHistory = [];
+  const EVENT_HISTORY_MAX = 200;
+
+  function getJobFingerprint(job) {
+    if (!job) return "";
+    const isTerminal = ["completed", "success", "error", "cancelled", "interrupted"].includes(job.state);
+    const progress = (isTerminal && job._cachedProgress)
+      ? job._cachedProgress
+      : (job.progress && typeof job.progress === "object" && job.progress.phase
+          ? job.progress
+          : getTaskProgress(job));
+    const subagentsCount = progress?.subagents?.length || 0;
+    const actsCount = progress?.recent_activities?.length || 0;
+    return `${job.state}|${job.completedAt || ""}|${progress?.current_step || 0}|${progress?.phase || ""}|${progress?.current_action || ""}|${progress?.last_tool || ""}|${subagentsCount}|${actsCount}|${job.attempts || 1}|${job.cancelRequested ? 1 : 0}`;
+  }
+
+  // 初始化指纹表
+  try {
+    const initJobs = getAllJobs();
+    for (const j of initJobs) {
+      lastJobFingerprints.set(j.jobId, getJobFingerprint(j));
+    }
+  } catch {}
+
+  function safeSendEvent(client, eventType, dataObj, id) {
+    try {
+      if (client.writableEnded || client.destroyed) {
+        sseClients.delete(client);
+        return false;
+      }
+      let msg = "";
+      if (id !== undefined) {
+        msg += `id: ${id}\n`;
+      }
+      msg += `event: ${eventType}\ndata: ${JSON.stringify(dataObj)}\n\n`;
+      client.write(msg);
+      return true;
+    } catch {
+      sseClients.delete(client);
+      return false;
+    }
+  }
+
+  function safeSendRaw(client, rawStr) {
+    try {
+      if (client.writableEnded || client.destroyed) {
+        sseClients.delete(client);
+        return false;
+      }
+      client.write(rawStr);
+      return true;
+    } catch {
+      sseClients.delete(client);
+      return false;
+    }
+  }
 
   function getAllJobs() {
     if (memoryJobs) {
@@ -207,14 +269,110 @@ export function startDashboardServer(options = {}) {
       return;
     }
 
-    // 3. 所有任务列表 API
+    // 3. 任务列表 API（支持服务端分页、多维过滤、模糊搜索与向下兼容）
     if (pathname === "/api/jobs") {
-      const all = getAllJobs();
-      // 按开始时间降序排序
-      all.sort((a, b) => new Date(b.startedAt || 0).getTime() - new Date(a.startedAt || 0).getTime());
-      const payload = all.map(formatJobDetail);
+      const searchParams = reqUrl.searchParams;
+      const pageParam = searchParams.get("page");
+      const limitParam = searchParams.get("limit");
+      const stateParam = searchParams.get("state");
+      const searchParam = searchParams.get("search");
+
+      // 判定是否进入标准分页过滤模式；若未指定任何相关参数，则保持向后兼容全量数组
+      const isPaginated = pageParam !== null || limitParam !== null || stateParam !== null || searchParam !== null;
+
+      // 获取全部原始任务（复用已有的 mtime LRU 缓存）
+      let jobs = getAllJobs();
+
+      // 步骤 1: 内存过滤 - 状态精确匹配 (running, queued, success, error, cancelled, interrupted 等)
+      if (stateParam !== null && stateParam.trim() !== "") {
+        const targetState = stateParam.trim();
+        jobs = jobs.filter((j) => j.state === targetState);
+      }
+
+      // 步骤 2: 内存过滤 - 关键词模糊检索 (大小写不敏感，覆盖 Job ID、Prompt、SlashCommand 及 Response 摘要)
+      if (searchParam !== null && searchParam.trim() !== "") {
+        const term = searchParam.trim().toLowerCase();
+        jobs = jobs.filter((j) => {
+          const id = String(j.jobId || "").toLowerCase();
+          const prompt = String(
+            j.invocation?.prompt ||
+            j.invocation?.slash_command ||
+            (j.result?.response ? j.result.response.slice(0, 120) : "") ||
+            ""
+          ).toLowerCase();
+          return id.includes(term) || prompt.includes(term);
+        });
+      }
+
+      // 步骤 3: 内存时间降序排序 (最新优先，防 NaN / null 漂移)
+      jobs.sort((a, b) => {
+        const timeA = a.startedAt ? new Date(a.startedAt).getTime() : 0;
+        const timeB = b.startedAt ? new Date(b.startedAt).getTime() : 0;
+        const validA = Number.isNaN(timeA) ? 0 : timeA;
+        const validB = Number.isNaN(timeB) ? 0 : timeB;
+        return validB - validA;
+      });
+
+      // 步骤 4: 向后兼容分支 - 若请求未显式携带分页/过滤参数，直接返回全量格式化数组
+      if (!isPaginated) {
+        const payload = jobs.map(formatJobDetail);
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify(payload));
+        return;
+      }
+
+      // 步骤 5: 分页参数校验与边界防御性修正
+      // page: 默认 1, 1-based 索引, 必须 >= 1
+      let page = 1;
+      if (pageParam !== null) {
+        const parsedPage = parseInt(pageParam, 10);
+        if (!Number.isNaN(parsedPage) && parsedPage >= 1) {
+          page = parsedPage;
+        } else {
+          page = 1;
+        }
+      }
+
+      // limit: 默认 20, 合法范围 1~100
+      let limit = 20;
+      if (limitParam !== null) {
+        const parsedLimit = parseInt(limitParam, 10);
+        if (Number.isNaN(parsedLimit)) {
+          limit = 20;
+        } else if (parsedLimit < 1) {
+          limit = 1;
+        } else if (parsedLimit > 100) {
+          limit = 100;
+        } else {
+          limit = parsedLimit;
+        }
+      }
+
+      // 步骤 6: 分页元数据精准计算
+      const total = jobs.length;
+      const totalPages = total === 0 ? 0 : Math.ceil(total / limit);
+      const hasMore = page < totalPages;
+
+      // 步骤 7: 内存切片 - 超出页数时优雅返回空数组
+      const startIndex = (page - 1) * limit;
+      const endIndex = startIndex + limit;
+      const slicedJobs = (startIndex >= total) ? [] : jobs.slice(startIndex, endIndex);
+
+      // 步骤 8: 仅对当前切片调用 formatJobDetail，彻底杜绝磁盘高频 I/O 阻塞
+      const data = slicedJobs.map(formatJobDetail);
+
+      // 返回标准 REST 分页响应
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify(payload));
+      res.end(JSON.stringify({
+        data,
+        pagination: {
+          total,
+          page,
+          limit,
+          totalPages,
+          hasMore,
+        },
+      }));
       return;
     }
 
@@ -273,6 +431,70 @@ export function startDashboardServer(options = {}) {
       return;
     }
 
+    // 5.1 人机软介入交互 API (Human-in-the-loop)
+    const interactMatch = pathname.match(/^\/api\/jobs\/([^/]+)\/interact$/);
+    if (interactMatch && req.method === "POST") {
+      const jobId = interactMatch[1];
+      const job = getJobById(jobId);
+
+      // 若任务不存在或独立看板模式（无内存进程句柄），直接按契约返回 400
+      if (!job || !memoryJobs) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "Job is not running or stdin is closed" }));
+        return;
+      }
+
+      // 终态任务检查（running 态以外均按契约返回 400）
+      if (job.state !== "running") {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "Job is not running or stdin is closed" }));
+        return;
+      }
+
+      let bodyStr = "";
+      req.on("data", (chunk) => {
+        bodyStr += chunk.toString("utf8");
+      });
+
+      req.on("end", () => {
+        try {
+          let body = {};
+          if (bodyStr.trim()) {
+            try {
+              body = JSON.parse(bodyStr);
+            } catch {
+              res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+              res.end(JSON.stringify({ error: "Invalid JSON body" }));
+              return;
+            }
+          }
+
+          if (body.input === undefined || typeof body.input !== "string") {
+            res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+            res.end(JSON.stringify({ error: "input is required and must be a string" }));
+            return;
+          }
+
+          try {
+            const sendResult = sendInputToJob(job, body.input);
+            res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+            res.end(JSON.stringify({
+              success: true,
+              jobId,
+              bytesWritten: sendResult.bytesWritten,
+            }));
+          } catch (err) {
+            res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+            res.end(JSON.stringify({ error: err.message || "Job is not running or stdin is closed" }));
+          }
+        } catch (e) {
+          res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ error: e.message }));
+        }
+      });
+      return;
+    }
+
     // 6. SSE 实时事件流
     if (pathname === "/api/stream") {
       const headers = {
@@ -284,8 +506,36 @@ export function startDashboardServer(options = {}) {
         headers["Access-Control-Allow-Origin"] = origin;
       }
       res.writeHead(200, headers);
+
+      // 1. 严格满足既有单测契约：先推送 connected 事件
       res.write("event: connected\ndata: {}\n\n");
       sseClients.add(res);
+
+      // 2. 检查重连标识
+      const lastEventIdHeader = req.headers["last-event-id"];
+      const lastSeqQuery = reqUrl.searchParams.get("lastSeq");
+      const clientLastSeq = lastEventIdHeader ? parseInt(lastEventIdHeader, 10) : (lastSeqQuery ? parseInt(lastSeqQuery, 10) : null);
+
+      let replayed = false;
+      if (clientLastSeq !== null && !isNaN(clientLastSeq) && eventHistory.length > 0) {
+        const oldestSeq = eventHistory[0].id;
+        const newestSeq = eventHistory[eventHistory.length - 1].id;
+        if (clientLastSeq >= oldestSeq - 1 && clientLastSeq <= newestSeq) {
+          const missed = eventHistory.filter(e => e.id > clientLastSeq);
+          for (const ev of missed) {
+            safeSendEvent(res, ev.event, ev.data, ev.id);
+          }
+          replayed = true;
+        }
+      }
+
+      // 3. 若非增量重放，立即推送首屏快照（携带 seq 与 jobs）
+      if (!replayed) {
+        const all = getAllJobs();
+        all.sort((a, b) => new Date(b.startedAt || 0).getTime() - new Date(a.startedAt || 0).getTime());
+        const payload = all.map(formatJobDetail);
+        safeSendEvent(res, "snapshot", { seq: currentSeq, jobs: payload }, currentSeq);
+      }
 
       req.on("close", () => {
         sseClients.delete(res);
@@ -298,22 +548,103 @@ export function startDashboardServer(options = {}) {
     res.end("Not Found");
   });
 
-  // 每 1 秒向所有活跃的 SSE 连接广播当前任务快照
+  // 每 1 秒比对增量变更并记录事件历史，若有活跃连接则广播增量或发送保活心跳
   const broadcastInterval = setInterval(() => {
-    if (sseClients.size === 0) return;
     try {
       const all = getAllJobs();
-      all.sort((a, b) => new Date(b.startedAt || 0).getTime() - new Date(a.startedAt || 0).getTime());
-      const payload = all.map(formatJobDetail);
-      const dataStr = `event: snapshot\ndata: ${JSON.stringify(payload)}\n\n`;
-      for (const client of sseClients) {
-        try {
-          client.write(dataStr);
-        } catch {
-          sseClients.delete(client);
+      const currentMap = new Map();
+      for (const job of all) {
+        currentMap.set(job.jobId, job);
+      }
+
+      const createdJobs = [];
+      const updatedJobs = [];
+      const removedJobIds = [];
+
+      // 1. 比对新增与变更
+      for (const [jobId, job] of currentMap.entries()) {
+        const fpNew = getJobFingerprint(job);
+        if (!lastJobFingerprints.has(jobId)) {
+          createdJobs.push(job);
+          lastJobFingerprints.set(jobId, fpNew);
+        } else {
+          const fpOld = lastJobFingerprints.get(jobId);
+          if (fpOld !== fpNew) {
+            updatedJobs.push(job);
+            lastJobFingerprints.set(jobId, fpNew);
+          }
         }
       }
-    } catch {}
+
+      // 2. 比对已移除任务
+      for (const oldId of Array.from(lastJobFingerprints.keys())) {
+        if (!currentMap.has(oldId)) {
+          removedJobIds.push(oldId);
+          lastJobFingerprints.delete(oldId);
+        }
+      }
+
+      const hasChanges = createdJobs.length > 0 || updatedJobs.length > 0 || removedJobIds.length > 0;
+
+      // 无变动周期：若有活跃客户端则推送轻量保活心跳（杜绝带宽浪费）
+      if (!hasChanges) {
+        if (sseClients.size > 0) {
+          for (const client of Array.from(sseClients)) {
+            safeSendRaw(client, ":keep-alive\n\n");
+          }
+        }
+        return;
+      }
+
+      // 3. 有变动周期：生成增量事件
+      const eventsToBroadcast = [];
+
+      for (const job of createdJobs) {
+        currentSeq += 1;
+        eventsToBroadcast.push({
+          id: currentSeq,
+          event: "job_created",
+          data: { seq: currentSeq, job: formatJobDetail(job) },
+        });
+      }
+
+      for (const job of updatedJobs) {
+        currentSeq += 1;
+        eventsToBroadcast.push({
+          id: currentSeq,
+          event: "job_updated",
+          data: { seq: currentSeq, jobId: job.jobId, patch: formatJobDetail(job) },
+        });
+      }
+
+      for (const removedId of removedJobIds) {
+        currentSeq += 1;
+        eventsToBroadcast.push({
+          id: currentSeq,
+          event: "job_removed",
+          data: { seq: currentSeq, jobId: removedId },
+        });
+      }
+
+      // 存入环形历史缓冲区
+      for (const ev of eventsToBroadcast) {
+        eventHistory.push(ev);
+        if (eventHistory.length > EVENT_HISTORY_MAX) {
+          eventHistory.shift();
+        }
+      }
+
+      // 广播给活跃客户端
+      if (sseClients.size > 0) {
+        for (const client of Array.from(sseClients)) {
+          for (const ev of eventsToBroadcast) {
+            safeSendEvent(client, ev.event, ev.data, ev.id);
+          }
+        }
+      }
+    } catch {
+      // 容错保护，杜绝定时器意外退出
+    }
   }, 1000);
 
   return new Promise((resolve, reject) => {

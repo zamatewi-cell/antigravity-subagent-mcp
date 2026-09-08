@@ -425,7 +425,7 @@ export function parseLocalTranscript(transcriptPath) {
  * @param {string} parentState - 父任务生命周期状态
  * @returns {object|null} - 动态聚合的结构化状态
  */
-export function parseTranscript(transcriptPath, depth = 0, maxDepth = 8, visited = new Set(), parentState = "running") {
+export function parseTranscript(transcriptPath, depth = 0, maxDepth = 8, visited = new Set(), parentState = "running", parentId = null) {
   if (!transcriptPath || !fs.existsSync(transcriptPath)) return null;
   if (visited.has(transcriptPath)) return null;
   visited.add(transcriptPath);
@@ -436,6 +436,28 @@ export function parseTranscript(transcriptPath, depth = 0, maxDepth = 8, visited
   // 递归聚合各级子代理的真实微观工作明细（每次依据最新的子代理文件和 parentState 动态计算）
   const allDiscoveredSubagents = [];
   for (const sub of local.directSubagents) {
+    let childrenIds = [];
+    let childParsed = null;
+
+    if (sub.conversation_id && depth < maxDepth) {
+      const subTranscriptPath = locateTranscriptPath(sub.conversation_id);
+      if (subTranscriptPath) {
+        childParsed = parseTranscript(subTranscriptPath, depth + 1, maxDepth, visited, parentState, sub.conversation_id);
+        if (childParsed) {
+          childParsed.conversation_id = sub.conversation_id;
+          if (childParsed.directSubagents && Array.isArray(childParsed.directSubagents)) {
+            childrenIds = childParsed.directSubagents
+              .map((c) => c.conversation_id)
+              .filter(Boolean);
+          }
+        }
+      }
+    }
+
+    const roleLower = String(sub.role || "").toLowerCase();
+    const isOrchestrator = childrenIds.length > 0 || roleLower.includes("orchestrator") || roleLower.includes("planner") || roleLower.includes("lead");
+    const nodeType = isOrchestrator ? "orchestrator" : "worker";
+
     const subInfo = {
       role: sub.role,
       type: sub.type,
@@ -445,6 +467,10 @@ export function parseTranscript(transcriptPath, depth = 0, maxDepth = 8, visited
       current_action: "等待调度中...",
       last_tool: null,
       recent_activities: [],
+      parentId: parentId || null,
+      depth: depth + 1,
+      childrenIds,
+      nodeType,
     };
 
     if (local.killedConversationIds && sub.conversation_id && local.killedConversationIds.has(sub.conversation_id)) {
@@ -452,27 +478,20 @@ export function parseTranscript(transcriptPath, depth = 0, maxDepth = 8, visited
       subInfo.current_action = "已被父任务显式终止 (killed)";
     }
 
-    if (sub.conversation_id && depth < maxDepth) {
-      const subTranscriptPath = locateTranscriptPath(sub.conversation_id);
-      if (subTranscriptPath) {
-        const childParsed = parseTranscript(subTranscriptPath, depth + 1, maxDepth, visited, parentState);
-        if (childParsed) {
-          childParsed.conversation_id = sub.conversation_id;
-          subInfo.step = childParsed.currentStep;
-          subInfo.current_action = childParsed.currentAction;
-          subInfo.last_tool = childParsed.lastTool;
-          subInfo.status = evaluateSubagentStatus(childParsed, local.killedConversationIds, parentState);
-          subInfo.recent_activities = childParsed.recentActivities.slice(-100);
+    if (childParsed) {
+      subInfo.step = childParsed.currentStep;
+      subInfo.current_action = childParsed.currentAction;
+      subInfo.last_tool = childParsed.lastTool;
+      subInfo.status = evaluateSubagentStatus(childParsed, local.killedConversationIds, parentState);
+      subInfo.recent_activities = childParsed.recentActivities.slice(-100);
 
-          // 递归汇总更深层子代理（孙代等），扁平展示给调用方
-          if (childParsed.subagents && childParsed.subagents.length > 0) {
-            for (const descendant of childParsed.subagents) {
-              allDiscoveredSubagents.push(descendant);
-            }
-          }
+      // 递归汇总更深层子代理（孙代等），扁平展示给调用方
+      if (childParsed.subagents && childParsed.subagents.length > 0) {
+        for (const descendant of childParsed.subagents) {
+          allDiscoveredSubagents.push(descendant);
         }
       }
-    } else if (sub.conversation_id) {
+    } else if (sub.conversation_id && depth >= maxDepth) {
       subInfo.current_action = "运行中（深度超出最大解析层级）";
     }
 
@@ -488,6 +507,7 @@ export function parseTranscript(transcriptPath, depth = 0, maxDepth = 8, visited
     lastTool: local.lastTool,
     lastEntry: local.lastEntry,
     lastPlannerEntry: local.lastPlannerEntry,
+    directSubagents: local.directSubagents,
     subagents: allDiscoveredSubagents,
     recentActivities: local.recentActivities.slice(-100),
   };
@@ -556,8 +576,9 @@ export function getTaskProgress(job) {
     job.conversationId = conversationId;
   }
 
+  const rootId = conversationId || job.jobId || null;
   const transcriptPath = locateTranscriptPath(conversationId);
-  const transcriptInfo = transcriptPath ? parseTranscript(transcriptPath, 0, 8, new Set(), job.state) : null;
+  const transcriptInfo = transcriptPath ? parseTranscript(transcriptPath, 0, 8, new Set(), job.state, rootId) : null;
   const fallbackInfo = fallbackFromLog(job.invocation?.log_file);
 
   let phase = "running";
@@ -592,6 +613,10 @@ export function getTaskProgress(job) {
     current_action: sanitizeDiagnostics(sub.current_action, 150),
     last_tool: sub.last_tool,
     recent_activities: (sub.recent_activities || []).map((act) => sanitizeDiagnostics(act, 200)),
+    parentId: sub.parentId !== undefined ? sub.parentId : (rootId || null),
+    depth: typeof sub.depth === "number" ? sub.depth : 1,
+    childrenIds: Array.isArray(sub.childrenIds) ? sub.childrenIds : [],
+    nodeType: sub.nodeType || (sub.childrenIds && sub.childrenIds.length > 0 ? "orchestrator" : "worker"),
   }));
 
   return {

@@ -13,7 +13,7 @@ import { persistJob, restorePersistedJobs } from "./storage.mjs";
 import { startDashboardServer, openInBrowser } from "./dashboard.mjs";
 import { withDirectoryLock } from "./directory-lock.mjs";
 
-const SERVER_VERSION = "1.3.3";
+const SERVER_VERSION = "1.4.0";
 const DEFAULT_MODEL = process.env.ANTIGRAVITY_DEFAULT_MODEL || "gemini-3.8-flash-high";
 const DEFAULT_PERMISSION_MODE = process.env.ANTIGRAVITY_PERMISSION_MODE || "auto-approve";
 const DEFAULT_TIMEOUT_SECONDS = 300;
@@ -187,7 +187,7 @@ function launchAgy(input, jobId = randomUUID()) {
     windowsHide: true,
     detached: process.platform !== "win32",
     shell: false,
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["pipe", "pipe", "pipe"],
   });
   job.child = child;
   jobs.set(jobId, job);

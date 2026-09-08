@@ -23,6 +23,23 @@ The bridge never invokes `--disable-slash-commands`. It uses AGY's required
 Per-job AGY logs are stored under `logs/` so a bridge response can be matched to
 the original backend error without scanning unrelated global CLI logs.
 
+Version 1.4.0 changes:
+
+- **Historical Jobs Pagination & Multidimensional Filtering (R1)**:
+  - Added full query parameter parsing to `GET /api/jobs` supporting `page` (default: 1), `limit` (default: 20, clamp: 1-100), `state` exact filtering, and `search` case-insensitive substring search matching prompt and job ID.
+  - Standardized paginated response structure `{ data: Job[], pagination: { total, page, limit, totalPages, hasMore } }` with transparent backward-compatibility for unparameterized requests.
+  - Applied in-memory LRU slicing to eliminate redundant disk deserialization of 100+ jobs.
+- **Fine-Grained SSE Delta Event Streaming & Frontend Delta Patching (R2)**:
+  - Re-architected `GET /api/stream` to dispatch initial `snapshot` with incrementing cursor `seq`, followed by fine-grained differential events (`job_created`, `job_updated`, `job_removed`) or lightweight `:keep-alive` comments during idle intervals.
+  - Implemented client-side memory dictionary (`jobsById`) with surgical DOM patching in `index.html`, eliminating layout thrashing and focus drops from full-page `innerHTML` rebuilds.
+  - Fixed offline reconnection edge case via continuous `eventHistory` circular buffer tracking and automatic snapshot fallback.
+- **Native Zero-Dependency SVG Agent DAG Topology (R3)**:
+  - Augmented recursive agent tree assembly with directional topological metadata (`parentId`, `depth`, `childrenIds`, `nodeType`).
+  - Rendered compact hierarchical DAG visualizer using a dual-layer architecture: underlying SVG cubic Bézier flowing wires with pure CSS hardware-accelerated neon breathing keyframes (`wireFlow`, `wireBreath`), and top-layer absolute HTML interactive cards.
+- **Human-in-the-loop (HITL) Soft Intervention Pipeline (R4)**:
+  - Configured child process spawn with `stdio: ["pipe", "pipe", "pipe"]` and implemented safe `sendInputToJob` with newline auto-completion and EPIPE crash guard.
+  - Exposed local-origin/Host protected `POST /api/jobs/:id/interact` endpoint and integrated responsive web console with quick approval shortcuts (`[Y]`, `[N]`, `[Enter]`) and live audit logging.
+
 Version 1.3.3 changes:
 
 - **Two-Tier Parser Architecture & Decoupled Concurrency Locking**:
@@ -108,7 +125,21 @@ Version 1.0.3 reliability changes:
   resolve project inputs instead of substituting the default scratch workspace.
   This supplies workspace context, not a filesystem sandbox.
 
-Offline validation: `npm run test:diagnostics` and `npm run test:lifecycle`.
+Offline validation (aggregates all 10 unit and integration test suites):
+`npm run test:offline`
+
+Individual test suites:
+- R1 Historical Jobs Pagination & Filtering: `node test/pagination.test.mjs`
+- R2 Fine-Grained SSE Delta Events: `node test/sse-delta.test.mjs`
+- R3 Native SVG Agent DAG Topology: `node test/dag-topology.test.mjs`
+- R4 Human-in-the-loop Soft Intervention: `node test/hitl.test.mjs`
+- Lifecycle & Process Control: `node test/lifecycle.test.mjs`
+- Cancel Consistency & Lifecycle Guard: `node test/cancel-consistency.test.mjs`
+- Counterexamples & Defense in Depth: `node test/counterexamples.test.mjs`
+- Dashboard API & Web UI: `node test/dashboard.test.mjs`
+- Progress Parsing & Hierarchy: `node test/progress.test.mjs`
+- Structured Diagnostics: `node test/diagnostics.test.mjs`
+
 Live validation (uses Gemini quota, writes only its temporary fixture workspace):
 `npm run test:live`. The live report checks exact file contents; file output alone
 does not prove that Teamwork launched multiple agents.
