@@ -404,22 +404,24 @@
       margin-bottom: 12px;
       font-size: 12px;
       font-family: var(--font-mono);
-      min-height: 48px;
-      display: flex;
-      align-items: center;
+      min-height: 52px;
+      display: block;
       color: #e2e8f0;
-      line-height: 1.4;
-      word-break: break-all;
+      line-height: 1.6;
+      word-break: break-word;
     }
     .tool-tag {
       background: rgba(14, 165, 233, 0.2);
       color: #38bdf8;
-      padding: 2px 6px;
+      padding: 2px 7px;
       border-radius: 4px;
-      font-weight: 600;
-      margin-right: 6px;
+      font-weight: 700;
+      margin-right: 8px;
       border: 1px solid rgba(14, 165, 233, 0.4);
       display: inline-block;
+      white-space: nowrap;
+      word-break: keep-all;
+      vertical-align: baseline;
     }
     .subagent-footer {
       display: flex;
@@ -437,6 +439,9 @@
       border-radius: 10px;
       padding: 18px;
       margin-top: 16px;
+      max-height: 420px;
+      display: flex;
+      flex-direction: column;
     }
     .timeline-header {
       display: flex;
@@ -445,11 +450,15 @@
       margin-bottom: 14px;
       padding-bottom: 10px;
       border-bottom: 1px solid var(--border-subtle);
+      flex-shrink: 0;
     }
     .timeline-list {
       list-style: none;
       position: relative;
       padding-left: 20px;
+      overflow-y: auto;
+      flex: 1;
+      padding-right: 8px;
     }
     .timeline-list::before {
       content: "";

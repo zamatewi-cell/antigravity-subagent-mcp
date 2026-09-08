@@ -367,7 +367,7 @@ export function parseTranscript(transcriptPath, depth = 0, maxDepth = 8, visited
             subInfo.current_action = childParsed.currentAction;
             subInfo.last_tool = childParsed.lastTool;
             subInfo.status = evaluateSubagentStatus(childParsed, killedConversationIds, parentState);
-            subInfo.recent_activities = childParsed.recentActivities.slice(-3);
+            subInfo.recent_activities = childParsed.recentActivities.slice(-100);
 
             // 递归汇总更深层子代理（孙代等），扁平展示给调用方
             if (childParsed.subagents && childParsed.subagents.length > 0) {
@@ -384,13 +384,16 @@ export function parseTranscript(transcriptPath, depth = 0, maxDepth = 8, visited
       allDiscoveredSubagents.push(subInfo);
     }
 
+    const maxSubStep = allDiscoveredSubagents.reduce((m, s) => Math.max(m, s.step || 0), 0);
+    const aggregatedStep = Math.max(currentStep, maxSubStep);
+
     return {
-      currentStep,
+      currentStep: aggregatedStep,
       currentAction,
       lastTool,
       lastEntry,
       subagents: allDiscoveredSubagents,
-      recentActivities: recentActivities.slice(-5),
+      recentActivities: recentActivities.slice(-100),
     };
   } catch {
     return null;
