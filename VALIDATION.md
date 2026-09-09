@@ -103,7 +103,7 @@
 - [x] **Test 6**: 验证独立看板只读模式下拒绝软介入并返回 HTTP 400。
 - [x] **Test 7**: 验证子进程管道关闭或 EPIPE 异常触发时，宿主主进程不崩溃且被妥善兜底捕获。
 - [x] **Test 8**: 验证 64 KiB 请求体大小上限防御（超出返回 HTTP 413 Payload Too Large）。
-- [x] **Test 9**: 验证底层 write 失败时的异步物理确认与真实 reject 机制，杜绝假成功。
+- [x] **Test 9**: 验证底层 write 失败时的 stream write callback confirmation 与真实 reject 机制，杜绝假成功。
 
 ---
 
@@ -118,7 +118,7 @@
   4. 边界覆盖全面：超页数（`page=999`）优雅返回 `{ data: [], pagination: { ... hasMore: false } }`；非法参数（`page=-5`, `limit=abc`）自动降级为安全缺省；`limit` 严格截断至 1~100 范围；无参请求保持向后兼容直接返回全量数组 `JobDetail[]`。
 
 ### 验收标准 2：SSE 增量事件、游标重放与客户端状态收敛一致性 (AC2)
-- **断言事实**: 运行 `node test/sse-delta.test.mjs`，6/6 测试用例 100% PASS。
+- **断言事实**: 运行 `node test/sse-delta.test.mjs`，7/7 测试用例 100% PASS。
 - **证据链**:
   1. 客户端建立 SSE 连接后，首先收到 `event: connected`，紧随携带递增版本序号的 `event: snapshot`（`{ seq: N, jobs: [...] }`）。
   2. 模拟任务在后台步数递增及状态变动时，服务端精准推送细粒度增量事件 `event: job_updated`，payload 包含 `seq`, `jobId`, `patch`，而非冗余全量快照。
