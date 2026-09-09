@@ -280,6 +280,73 @@ try {
 
   partialClient.close();
   reconnectClient.close();
+
+  // 8. 专项验证：stream 模式下浅层 job.progress 未挂载 subagents，但深层 transcript 中子代理从 Step 1 走到 40，必须触发 job_updated
+  console.log("\n[Test 8] 验证 stream 模式下深层子代理步数推进 (Step 1 -> Step 40) 必须触发 job_updated...");
+  const streamClient = createSSEClient();
+  await new Promise((r) => setTimeout(r, 400));
+
+  const originalUserProfile = process.env.USERPROFILE;
+  process.env.USERPROFILE = tempDir;
+  const streamJobId = "job-stream-step-test";
+  const convId = "stream-conv-3333-4444-5555";
+  const transcriptDir = path.join(tempDir, ".gemini", "antigravity", "brain", convId, ".system_generated", "logs");
+  fs.mkdirSync(transcriptDir, { recursive: true });
+  const transcriptFile = path.join(transcriptDir, "transcript.jsonl");
+
+  fs.writeFileSync(transcriptFile, JSON.stringify({
+    step_index: 1,
+    type: "PLANNER_RESPONSE",
+    content: "初始化子代理",
+    tool_calls: [{
+      name: "invoke_subagent",
+      args: { Subagents: [{ TypeName: "worker", Role: "Stream Worker", Prompt: "do work" }] }
+    }]
+  }) + "\n");
+
+  const streamJob = {
+    jobId: streamJobId,
+    conversationId: convId,
+    sessionMode: "stream",
+    state: "running",
+    startedAt: new Date().toISOString(),
+    completedAt: null,
+    invocation: { prompt: "stream 模式子代理任务", cwd: tempDir },
+    attempts: 1,
+    // 浅层 progress 保持 stream 运行时特征（不挂载 subagents）
+    progress: {
+      phase: "executing",
+      current_step: 1,
+      current_action: "主编排器流式交互",
+      subagents: [],
+      recent_activities: ["Step 1: 主编排器流式交互"],
+    },
+  };
+  testMemoryJobs.set(streamJobId, streamJob);
+
+  // 等待系统捕获 streamJob 的初始指纹
+  await new Promise((r) => setTimeout(r, 1200));
+  const streamEventsLen = streamClient.events.length;
+
+  // 模拟深层 transcript 步数从 1 推进到 40
+  fs.appendFileSync(transcriptFile, JSON.stringify({
+    step_index: 40,
+    type: "PLANNER_RESPONSE",
+    content: "子代理进入第 40 步处理",
+    tool_calls: [{
+      name: "run_command",
+      args: { CommandLine: "npm test" }
+    }]
+  }) + "\n");
+
+  await new Promise((r) => setTimeout(r, 1200));
+  const streamUpdateEvt = streamClient.events.slice(streamEventsLen).find(e => e.type === "job_updated" && e.data.jobId === streamJobId);
+  assert(streamUpdateEvt, "stream 任务深层子代理步数推进时，服务端必须广播 job_updated，绝不能只有心跳！");
+  console.log("  -> PASS: stream 模式下子代理步数推进被成功感知并广播 job_updated");
+  process.env.USERPROFILE = originalUserProfile;
+  testMemoryJobs.delete(streamJobId);
+  streamClient.close();
+
   console.log("\n[All Tests Passed] SSE 增量事件广播与客户端同步验证 100% 成功！\n");
 } finally {
   if (dashboard) {

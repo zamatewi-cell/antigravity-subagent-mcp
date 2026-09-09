@@ -181,4 +181,14 @@
    - 发现能够导致宿主崩溃、内存泄露或安全越权的真 Bug（P1/P2）；
    - Google Antigravity 官方 CLI 发生物理性破坏破坏性变更（Breaking Changes）；
    - 能够证明能直接令 Codex 编码吞吐量或任务执行成功率产生质的飞跃的关键优化。
-3. **交付基准**：当前架构已具备完整的单次委托、多轮交互、双向流传输、细粒度状态穿透与实时可视化能力，已作为高可靠的个人与团队 Agent 基础设施正式封板。
+---
+
+## 七、v1.5.3 状态可信与看板视图稳健修复验证 (v1.5.3 Reliability Validation)
+
+| 审计缺陷项 | 修复方案与工程实现 | 验证用例与断言证据 |
+| :--- | :--- | :--- |
+| **1. [P2] stream 子代理变化未进入 SSE 变更检测** | `src/dashboard.mjs` 中抽离并复用 `resolveJobProgress(job)`，统一展示层 `formatJobDetail` 与感知层 `getJobFingerprint` 的数据源，深度解析深层 transcript 子代理步数与动作。 | 自动化单测 `test/sse-delta.test.mjs` (Test 8)：模拟 stream 任务浅层 `subagents` 为空，深层 transcript 中子代理从 Step 1 走到 40，断言服务端成功感知指纹变化并向客户端广播 `job_updated` 增量事件，100% PASS。 |
+| **2. [P2] 筛选和分页会被快照覆盖** | `src/web/index.html` 的 `snapshot` 监听器引入 `isViewingCustomQuery()` 保护机制：当用户处于自定义状态过滤、翻页（`page > 1`）或搜索时，禁止清空 `jobsById`，仅对已有项打补丁并静默拉取当前查询数据。 | 手动与接口校验：处于“已完成、第 2 页”时，重连 snapshot 不会破坏分页器与自定义 5 条数据视图。 |
+| **3. [P2] 按数组下标选择子代理重排换人失焦** | 前端将 `selectedSubagentIndex` 全面重构为基于唯一标识的 `selectedSubagentId`，通过 `getSubagentId` (提取 `conversation_id` / `id` / `role`) 绑定卡片矩阵、微观流水与 DAG 节点。 | 无论前置插入多少个子代理或数组如何重排，选中的子代理微观流水与高亮焦点死死绑定，绝对不换人；节点销毁时平滑降级至主编排器。 |
+| **4. [P2] 局部/转折未完成依然被误判** | `src/progress.mjs` 引入 `BUT_NOT_FINISHED` 转折分句一票否决规则（匹配“已完成XX；YY还没生成”、“代码已完成，但测试还没跑”等语义）。 | 自动化单测 `test/counterexamples.test.mjs` (Test 23)：对 7 组典型转折未完工用例进行严密断言，`isExplicitlyCompleted` 均返回 `false`，`evaluateSubagentStatus` 保持 `running`，100% PASS。 |
+| **5. 沙箱隔离与生产零污染** | 全量 11 套套件统一回归，强约束隔离至 `tempDir`。 | 生产目录 `./data/jobs` 严格维持 105 个文件（`Count: 105`），零新增、零修改、零污染。 |

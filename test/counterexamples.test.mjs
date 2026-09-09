@@ -10,7 +10,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-counterexamples-"));
 process.env.ANTIGRAVITY_MCP_DATA_DIR = path.join(tempDir, "data");
 
-const { parseTranscript, parseLocalTranscript, evaluateSubagentStatus, formatToolAction, getTaskProgress } = await import("../src/progress.mjs");
+const { parseTranscript, parseLocalTranscript, evaluateSubagentStatus, formatToolAction, getTaskProgress, isExplicitlyCompleted } = await import("../src/progress.mjs");
 const { persistJob, restorePersistedJobs, JOBS_DIR } = await import("../src/storage.mjs");
 const { withDirectoryLock, normalizeDirectoryKey } = await import("../src/directory-lock.mjs");
 const { StreamLineParser } = await import("../src/stream-transport.mjs");
@@ -634,7 +634,35 @@ try {
   assert.equal(restoredStreamJob.numTurns, 3, "numTurns 必须被正确固化并还原！");
   console.log("  -> PASS: stream 模式与交互轮数持久化还原完整无缺");
 
-  console.log("\n[All Tests Passed] 全部 22 项专项反例测试 100% 成功通过！\n");
+  // 23. 反例 23：转折与局部完工未闭环反例精准拦截
+  console.log("\n[Test 23] 验证转折分句未闭环（输入校验完成但输出还没生成、代码完成但测试没跑）绝不误判已完成...");
+  const counterTurns = [
+    "已完成输入校验；输出文件还没生成",
+    "代码已完成，但测试还没跑",
+    "核心逻辑已完成；单元测试尚未编写",
+    "第一阶段已完成，不过文档还没生成",
+    "已完成接口封装，还有两个边界用例没测",
+    "Implementation completed, but tests haven't run yet",
+    "Feature done; verification pending",
+  ];
+  for (const text of counterTurns) {
+    assert.equal(isExplicitlyCompleted(text), false, `文本 [${text}] 包含转折未完工事实，必须一票否决！`);
+    const mockAgent = {
+      conversation_id: "turn-agent",
+      lastEntry: {
+        type: "PLANNER_RESPONSE",
+        content: text,
+      },
+    };
+    assert.equal(
+      evaluateSubagentStatus(mockAgent, new Set(), "running"),
+      "running",
+      `代理处于 [${text}] 阶段时，生命周期状态必须保持 running！`
+    );
+  }
+  console.log("  -> PASS: 转折未完工分句全部被精准一票否决，状态稳固保持 running");
+
+  console.log("\n[All Tests Passed] 全部 23 项专项反例测试 100% 成功通过！\n");
 } finally {
   fs.rmSync(tempDir, { recursive: true, force: true });
 }

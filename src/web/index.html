@@ -909,7 +909,7 @@
     <div class="brand">
       <div class="brand-logo">AG</div>
       <div class="brand-title">Antigravity Subagent Monitor</div>
-      <div class="brand-badge">v1.5.2</div>
+      <div class="brand-badge">v1.5.3</div>
     </div>
     <div class="header-status">
       <div id="liveBadge" class="live-indicator">
@@ -1092,9 +1092,19 @@
     const jobsById = new Map(); // jobId -> JobDetail
     let currentJobs = [];       // Array.from(jobsById.values())
     let selectedJobId = null;
-    let selectedSubagentIndex = null;
+    let selectedSubagentId = null; // null 表示主编排器，字符串表示子代理唯一标识
     let currentTab = "subagents";
     let lastSeq = 0;
+
+    function getSubagentId(sub, idx) {
+      if (!sub) return null;
+      return sub.conversation_id || sub.id || (sub.role ? `role:${sub.role}` : `idx:${idx}`);
+    }
+
+    function getSelectedSubagent(subagents) {
+      if (!selectedSubagentId || !Array.isArray(subagents)) return null;
+      return subagents.find((sub, idx) => getSubagentId(sub, idx) === selectedSubagentId) || null;
+    }
 
     let currentFilter = {
       page: 1,
@@ -1102,6 +1112,11 @@
       state: "",
       search: "",
     };
+
+    function isViewingCustomQuery() {
+      return currentFilter.page > 1 || !!currentFilter.state || !!currentFilter.search;
+    }
+
     let currentPagination = {
       total: 0,
       page: 1,
@@ -1282,7 +1297,7 @@
       }
 
       // 始终在网格最前置渲染主编排器卡片
-      const isLeadSelected = selectedSubagentIndex === null;
+      const isLeadSelected = selectedSubagentId === null;
       let gridHtml = `
         <div class="subagent-card ${isLeadSelected ? "selected" : ""}" onclick="selectSubagent(null)" style="border-color: ${isLeadSelected ? "var(--cyan)" : "rgba(14,165,233,0.3)"};">
           <div class="subagent-card-header">
@@ -1311,9 +1326,11 @@
         `;
       } else {
         gridHtml += subagents.map((sub, idx) => {
-          const isCardSelected = selectedSubagentIndex === idx;
+          const subId = getSubagentId(sub, idx);
+          const isCardSelected = selectedSubagentId === subId;
+          const safeSubId = escapeHtml(subId);
           return `
-            <div class="subagent-card ${isCardSelected ? "selected" : ""}" onclick="selectSubagent(${idx})">
+            <div class="subagent-card ${isCardSelected ? "selected" : ""}" onclick="selectSubagent('${safeSubId}')">
               <div class="subagent-card-header">
                 <div class="subagent-role">
                   <span style="display:inline-block; width:6px; height:6px; background:var(--cyan); border-radius:50%;"></span>
@@ -1374,12 +1391,13 @@
       // 3. 局部更新子代理卡片矩阵（保持卡片和 DAG 步数及状态绝对同步）
       renderSubagentGrid(job);
 
-      // 4. 微观流水局部更新（基于指纹比对，解决 100 条满载滑动后卡死不追加问题）
+      // 4. 微观流水局部更新（基于指纹比对，按 selectedSubagentId 稳定绑定）
       const subagents = job.progress?.subagents || [];
-      const isLead = selectedSubagentIndex === null;
+      const isLead = selectedSubagentId === null;
+      const selectedSub = isLead ? null : getSelectedSubagent(subagents);
       const acts = isLead 
         ? (job.progress?.recent_activities || [])
-        : (subagents[selectedSubagentIndex]?.recent_activities || []);
+        : (selectedSub?.recent_activities || []);
 
       const list = document.getElementById("timelineList");
       if (list) {
@@ -1418,7 +1436,7 @@
       if (prevCard) prevCard.classList.remove("active");
 
       selectedJobId = jobId;
-      selectedSubagentIndex = null;
+      selectedSubagentId = null;
 
       const nextCard = document.getElementById(`job-card-${selectedJobId}`);
       if (nextCard) nextCard.classList.add("active");
@@ -1519,8 +1537,8 @@
     }
 
     // 选中某个子代理展开微观流水（传入 null 则选回主编排器）
-    function selectSubagent(index) {
-      selectedSubagentIndex = index;
+    function selectSubagent(subId) {
+      selectedSubagentId = subId || null;
       renderJobDetail();
     }
 
@@ -1529,7 +1547,7 @@
       const panel = document.getElementById("timelinePanel");
       panel.style.display = "flex";
 
-      const isLead = selectedSubagentIndex === null;
+      const isLead = selectedSubagentId === null;
       let title = "";
       let convId = "";
       let acts = [];
@@ -1539,11 +1557,16 @@
         convId = `会话 ID: ${job.conversationId || job.jobId || "主会话"}`;
         acts = job.progress?.recent_activities || [];
       } else {
-        const sub = subagents[selectedSubagentIndex];
+        const sub = getSelectedSubagent(subagents);
         if (sub) {
           title = `${sub.role} 微观执行流水`;
           convId = `会话 ID: ${sub.conversation_id || "未知"}`;
           acts = sub.recent_activities || [];
+        } else {
+          // 若原选中子代理已不可寻址，平滑降级展示主编排器流水
+          title = "Lead Orchestrator (主编排器) 微观活动流水";
+          convId = `会话 ID: ${job.conversationId || job.jobId || "主会话"}`;
+          acts = job.progress?.recent_activities || [];
         }
       }
 
@@ -1681,6 +1704,17 @@
           // 兼容格式：{"seq": 1, "jobs": [...]} 或 直接 [...]
           const rawJobs = Array.isArray(payload) ? payload : (payload?.jobs || []);
           if (payload?.seq !== undefined) lastSeq = payload.seq;
+
+          // 核心防御：若用户正处于自定义过滤或翻页状态（如“已完成、第 2 页”），绝对不能被默认快照全量冲刷覆盖！
+          if (isViewingCustomQuery()) {
+            for (const job of rawJobs) {
+              if (job?.jobId && jobsById.has(job.jobId)) {
+                jobsById.set(job.jobId, { ...jobsById.get(job.jobId), ...job });
+              }
+            }
+            fetchJobs();
+            return;
+          }
 
           jobsById.clear();
           for (const job of rawJobs) {
@@ -1834,6 +1868,7 @@
       // 1. 注册项目主编排器根节点
       const rootNode = {
         id: rootId,
+        subId: null,
         role: "Lead Orchestrator (项目主编排器)",
         nodeType: "orchestrator",
         depth: 0,
@@ -1844,13 +1879,12 @@
         current_action: rootJob.progress?.last_tool
           ? `[${rootJob.progress.last_tool}] ${rootJob.progress.current_action}`
           : (rootJob.progress?.current_action || "推进主流程"),
-        subagentIndex: null,
       };
       nodesMap.set(rootId, rootNode);
 
       // 2. 遍历装配所有子代理节点
       (subagents || []).forEach((sub, idx) => {
-        const subId = sub.conversation_id || `sub-${idx}`;
+        const subId = getSubagentId(sub, idx);
         const pId = sub.parentId || rootId;
         const d = typeof sub.depth === "number" ? sub.depth : 1;
         const cIds = Array.isArray(sub.childrenIds) ? [...sub.childrenIds] : [];
@@ -1858,6 +1892,7 @@
 
         nodesMap.set(subId, {
           id: subId,
+          subId: subId,
           role: sub.role || "Subagent",
           nodeType: nType,
           depth: d,
@@ -1866,7 +1901,6 @@
           status: sub.status || "running",
           step: sub.step || 0,
           current_action: sub.current_action || "等待调度",
-          subagentIndex: idx,
         });
 
         // 维护父子依赖关系
@@ -1966,15 +2000,16 @@
 
       // 2. 渲染顶层 HTML5 交互节点卡片
       nodesLayer.innerHTML = layout.nodes.map((n) => {
-        const isSelected = selectedSubagentIndex === n.subagentIndex;
+        const isSelected = selectedSubagentId === n.subId;
         const isRunning = n.status === "running";
         const roleColor = n.nodeType === "orchestrator" ? "var(--cyan)" : "#fff";
         const badgeText = n.nodeType === "orchestrator" ? "编排器" : "工人";
+        const clickArg = n.subId ? `'${escapeHtml(n.subId)}'` : 'null';
         return `
           <div class="dag-node-box ${isRunning ? "running" : ""} ${isSelected ? "active" : ""}"
-               id="dag-node-${n.id}"
+               id="dag-node-${escapeHtml(n.id)}"
                style="left: ${n.x}px; top: ${n.y}px; width: ${n.width}px; height: ${n.height}px;"
-               onclick="selectSubagent(${n.subagentIndex})">
+               onclick="selectSubagent(${clickArg})">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
               <span style="font-weight: 700; font-size: 12px; color: ${roleColor}; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 165px;" title="${escapeHtml(n.role)}">
                 ${escapeHtml(n.role)}

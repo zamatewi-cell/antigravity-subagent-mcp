@@ -14,10 +14,50 @@ const WEB_ROOT = path.resolve(__dirname, "web");
 const HTML_FILE = path.join(WEB_ROOT, "index.html");
 
 const DEFAULT_PORT = Number(process.env.ANTIGRAVITY_DASHBOARD_PORT) || 3721;
-const DASHBOARD_VERSION = "1.5.2";
+const DASHBOARD_VERSION = "1.5.3";
 
 // 物理日志读取尾部内存缓存：logFile -> { mtimeMs, size, tail }，避免每秒重复打开同步读取
 const logTailCache = new Map();
+
+/**
+ * 统合任务当前的完整进度视图（深度融合 transcript 与 stream 浅层运行时）
+ * 供展示层（formatJobDetail）与变更感知层（getJobFingerprint）统一复用
+ * @param {object} job
+ * @returns {object} 完整的 progress 对象
+ */
+export function resolveJobProgress(job) {
+  if (!job) return {};
+  const isTerminal = ["completed", "success", "error", "cancelled", "interrupted"].includes(job.state);
+  if (isTerminal && job._cachedProgress) {
+    return job._cachedProgress;
+  }
+
+  // 始终先从 transcript 获取完整的子代理树与微观动作基线
+  const baseline = getTaskProgress(job) || {};
+  let progress;
+  if (job.progress && typeof job.progress === "object") {
+    progress = {
+      ...baseline,
+      ...job.progress,
+      // 关键字段确保保留 baseline 中从 transcript 动态解析出的完整集合
+      subagents: (baseline.subagents && baseline.subagents.length > 0) ? baseline.subagents : (job.progress.subagents || []),
+      dag_topology: baseline.dag_topology || job.progress.dag_topology || null,
+      recent_activities: (baseline.recent_activities && baseline.recent_activities.length > 0) ? baseline.recent_activities : (job.progress.recent_activities || []),
+    };
+  } else {
+    progress = baseline;
+  }
+
+  // 终态生命周期约束：一旦任务进入终态，必须消除 IDLE_AWAITING_INPUT 等过期运行阶段
+  if (isTerminal) {
+    if (!progress.phase || progress.phase === "IDLE_AWAITING_INPUT" || progress.phase === "WAITING_INPUT" || progress.phase === "EXECUTING") {
+      progress.phase = job.state === "success" ? "COMPLETED" : job.state.toUpperCase();
+    }
+    job._cachedProgress = progress;
+  }
+
+  return progress;
+}
 
 /**
  * 格式化输出提供给前端看板的任务视图对象
@@ -27,34 +67,7 @@ const logTailCache = new Map();
 export function formatJobDetail(job) {
   if (!job) return null;
 
-  // 终态任务直接复用固化进度缓存，杜绝重复 I/O
-  const isTerminal = ["completed", "success", "error", "cancelled", "interrupted"].includes(job.state);
-  let progress = isTerminal && job._cachedProgress ? job._cachedProgress : null;
-  if (!progress) {
-    // 始终先从 transcript 获取完整的子代理树与微观动作基线
-    const baseline = getTaskProgress(job) || {};
-    // 如果运行时有 stream 事件流产生的浅层增量，进行深度融合，绝不二选一丢失子代理树
-    if (job.progress && typeof job.progress === "object") {
-      progress = {
-        ...baseline,
-        ...job.progress,
-        // 关键字段确保保留 baseline 中从 transcript 动态解析出的完整集合
-        subagents: (baseline.subagents && baseline.subagents.length > 0) ? baseline.subagents : (job.progress.subagents || []),
-        dag_topology: baseline.dag_topology || job.progress.dag_topology || null,
-        recent_activities: (baseline.recent_activities && baseline.recent_activities.length > 0) ? baseline.recent_activities : (job.progress.recent_activities || []),
-      };
-    } else {
-      progress = baseline;
-    }
-
-    // 终态生命周期约束：一旦任务进入终态，必须消除 IDLE_AWAITING_INPUT 等过期运行阶段
-    if (isTerminal) {
-      if (!progress.phase || progress.phase === "IDLE_AWAITING_INPUT" || progress.phase === "WAITING_INPUT" || progress.phase === "EXECUTING") {
-        progress.phase = job.state === "success" ? "COMPLETED" : job.state.toUpperCase();
-      }
-      job._cachedProgress = progress;
-    }
-  }
+  const progress = resolveJobProgress(job);
 
   // 尝试读取物理日志尾部（若有），带 mtime/size 缓存并经过全量脱敏
   let logTail = "";
@@ -151,17 +164,12 @@ export function startDashboardServer(options = {}) {
 
   function getJobFingerprint(job) {
     if (!job) return "";
-    const isTerminal = ["completed", "success", "error", "cancelled", "interrupted"].includes(job.state);
-    const progress = (isTerminal && job._cachedProgress)
-      ? job._cachedProgress
-      : (job.progress && typeof job.progress === "object" && job.progress.phase
-          ? job.progress
-          : getTaskProgress(job));
+    const progress = resolveJobProgress(job);
 
-    // 稳定化子代理微观指纹（精准捕获 ID、状态流转、步数推进、动作切换、工具调用、拓扑链）
+    // 稳定化子代理微观指纹（精准捕获 ID/role、状态流转、步数推进、动作切换、工具调用、拓扑链）
     const subagentsFingerprint = (progress?.subagents || [])
       .map(s => {
-        const id = s.conversation_id || s.id || "";
+        const id = s.conversation_id || s.id || s.role || "";
         const children = Array.isArray(s.childrenIds) ? s.childrenIds.slice().sort().join(",") : "";
         return `${id}:${s.status || ""}:${s.step || 0}:${s.current_action || ""}:${s.last_tool || ""}:${s.parentId || ""}:[${children}]`;
       })
@@ -171,7 +179,7 @@ export function startDashboardServer(options = {}) {
     const actsCount = progress?.recent_activities?.length || 0;
     const lastAct = actsCount > 0 ? progress.recent_activities[actsCount - 1] : "";
 
-    return `${job.state}|${job.completedAt || ""}|${progress?.current_step || 0}|${progress?.phase || ""}|${progress?.current_action || ""}|${progress?.last_tool || ""}|${subagentsFingerprint}|${actsCount}:${lastAct}|${job.attempts || 1}|${job.cancelRequested ? 1 : 0}`;
+    return `${job.state}|${job.sessionMode || ""}|${job.numTurns || 0}|${job.completedAt || ""}|${progress?.current_step || 0}|${progress?.phase || ""}|${progress?.current_action || ""}|${progress?.last_tool || ""}|${subagentsFingerprint}|${actsCount}:${lastAct}|${job.attempts || 1}|${job.cancelRequested ? 1 : 0}`;
   }
 
   // 初始化指纹表

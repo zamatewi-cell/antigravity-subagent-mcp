@@ -15,7 +15,7 @@ import { persistJob, restorePersistedJobs } from "./storage.mjs";
 import { startDashboardServer, openInBrowser } from "./dashboard.mjs";
 import { withDirectoryLock } from "./directory-lock.mjs";
 
-const SERVER_VERSION = "1.5.2";
+const SERVER_VERSION = "1.5.3";
 const DEFAULT_MODEL = process.env.ANTIGRAVITY_DEFAULT_MODEL || "gemini-3.8-flash-high";
 const DEFAULT_PERMISSION_MODE = process.env.ANTIGRAVITY_PERMISSION_MODE || "auto-approve";
 const DEFAULT_TIMEOUT_SECONDS = 300;

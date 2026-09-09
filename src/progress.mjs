@@ -163,6 +163,9 @@ const PARTIAL_STEP_PROGRESS = /(?:已(?:完成|交付|执行)(?:第[一二三四
 // 依赖其他代理、等待审计/验收/裁判（如：“正在审计中”、“等待...结果”）
 const PENDING_AUDIT_OR_DEPENDENCY = /(?:(?:正在|还在|等待|需等|待)(?:[^\n。！？]{0,12}?)(?:审计|复核|评审|验收|验证|裁决|确认)|\bawaiting\s+(?:audit|review|verification)\b|\baudit(?:ing)?\s+in\s+progress\b)/i;
 
+// 转折未完工修饰（如：“已完成XX；YY还没生成”、“代码已完成，但测试还没跑”、“已完成A，还有B没写”）
+const BUT_NOT_FINISHED = /(?:(?:[，,；;]|\s+)(?:但|但是|然而|不过|却|而)\s*(?:[^\n。！？]{0,30}?)(?:还没|尚未|未曾|并未|未能|没跑|没做|没测|没写|没生成|未生成|未通过|待|正在|需要|还要|继续))|(?:(?:[；;]|\s{2,})(?:[^\n。！？]{0,30}?)(?:还没|尚未|未曾|并未|未能|没跑|没做|没测|没写|没生成|未生成|未通过|待办|进行中|未完成))|(?:(?:[，,；;]|\s+)(?:还剩|还有|仍有)\s*(?:[^\n。！？]{0,20}?)(?:未|还没|没|待))|\b(?:but|however|yet|while)\s+.*?\b(?:not\s+yet|pending|haven't|hasn't|in\s*progress|still|incomplete)\b/i;
+
 // 强完工交付证据（支持副词修饰、动宾短语与英文标准交付表述）
 const EXPLICIT_COMPLETION_CLAIM = /(?:已(?:全部|顺利|成功)?(?:完成|交付|完工|搞定|闭环)|(?:全部|所有|整项|整体|项目|均已|顺利|成功)(?:[^\n，。！？]{0,8}?)(?:完成|交付|完工|搞定|闭环)|已交付成果|工作已结束|全部测试通过|全部用例通过|VICTORY\s+CONFIRMED|all\s+tasks?\s+completed|successfully\s+(?:completed|delivered|finished)|(?:work|implementation)\s+(?:done|completed)|已生成\s*(?:[\w.-]+\/)*handoff\.md)/i;
 
@@ -177,8 +180,8 @@ export function isExplicitlyCompleted(text) {
   const str = text.trim();
   if (!str) return false;
 
-  // 1. 若包含明确否定完工修饰、活跃进行中时态或求助倾向，一票否决
-  if (NEGATED_COMPLETION.test(str) || EXPLICIT_IN_PROGRESS.test(str) || ASKING_OR_HELP.test(str)) {
+  // 1. 若包含明确否定完工修饰、活跃进行中时态、求助倾向或转折未完工分句，一票否决
+  if (NEGATED_COMPLETION.test(str) || EXPLICIT_IN_PROGRESS.test(str) || ASKING_OR_HELP.test(str) || BUT_NOT_FINISHED.test(str)) {
     return false;
   }
 

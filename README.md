@@ -4,11 +4,11 @@
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D20-brightgreen.svg)](https://nodejs.org/)
 [![Model Context Protocol](https://img.shields.io/badge/MCP-stdio-blue.svg)](https://modelcontextprotocol.io/)
 [![Google Antigravity](https://img.shields.io/badge/Gemini-3.8--flash--high-orange.svg)](https://antigravity.google/)
-[![Status](https://img.shields.io/badge/Status-Final%20GA%20(v1.5.2)-success.svg)](#)
+[![Status](https://img.shields.io/badge/Status-Final%20GA%20(v1.5.3)-success.svg)](#)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-> **项目状态：Final GA（v1.5.2 状态完全可信与看板全貌闭环版）**  
-> 本项目已全面解决用户复测报告抓出的 6 大真 Bug 与前端控件对齐细节（UTF-8 多字节解码防撕裂、Windows 路径大小写锁防穿透、持久化固化 sessionMode 与 numTurns、formatJobDetail 深度合并保障子代理全景树与终态收敛、完成状态文本一票否决规则、Web 看板抽离 renderSubagentGrid 毫秒级同步代理卡片矩阵与滚动断更修复），离线 11 套回归套件与 22 项专项反例 100% 成功通过，架构与特性严谨封板收官。
+> **项目状态：Final GA（v1.5.3 状态完全可信与看板视图稳健修复版）**  
+> 本项目已全面解决用户复测报告抓出的 4 项残留真问题（stream 模式深层子代理变动穿透 SSE 指纹广播 `job_updated`、前端快照防覆盖用户自定义筛选/分页视图、按持久化唯一标识 `selectedSubagentId` 锚定子代理与 DAG 节点彻底根除换人失焦、`BUT_NOT_FINISHED` 转折分句未闭环一票否决规则），离线 11 套回归套件与 23 项专项反例 100% 成功通过，生产目录 105 个文件零污染。
 
 ---
 
