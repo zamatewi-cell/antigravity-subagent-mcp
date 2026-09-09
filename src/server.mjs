@@ -25,6 +25,7 @@ function resolveAgyCliPath() {
   if (process.platform === "win32") {
     const candidatePaths = [
       "D:\\Antigravity\\agy\\bin\\agy.exe",
+      path.join(process.env.LOCALAPPDATA || "", "agy", "bin", "agy.exe"),
       path.join(process.env.LOCALAPPDATA || "", "Programs", "antigravity", "bin", "agy.exe"),
       path.join(process.env.LOCALAPPDATA || "", "Programs", "Antigravity", "bin", "agy.exe"),
       path.join(process.env.ProgramFiles || "", "Antigravity", "agy", "bin", "agy.exe"),
