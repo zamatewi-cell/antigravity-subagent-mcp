@@ -570,24 +570,39 @@ try {
   const keyLower = normalizeDirectoryKey(dirLower);
   if (process.platform === "win32") {
     assert.equal(keyUpper, keyLower, "Windows 下不同大小写的同一物理路径必须归一化为相同的锁键名！");
+    // 模拟两个并发任务分别使用大写和小写路径尝试获取锁
+    let lock1Active = false;
+    let lock2Waited = false;
+    const p1 = withDirectoryLock(dirUpper, async () => {
+      lock1Active = true;
+      await new Promise((r) => setTimeout(r, 60));
+      lock1Active = false;
+    });
+    const p2 = withDirectoryLock(dirLower, async () => {
+      // 当 p2 获取到锁时，p1 必须已经释放
+      assert.equal(lock1Active, false, "路径大小写别名绝不能并发穿透排队锁！");
+      lock2Waited = true;
+    });
+    await Promise.all([p1, p2]);
+    assert.equal(lock2Waited, true);
+    console.log("  -> PASS: Windows 大小写别名路径锁完全互斥，排队机制严密生效");
+  } else {
+    // POSIX 环境（如 Ubuntu/macOS 大小写敏感）验证同一目录的并发互斥排队
+    let lock1Active = false;
+    let lock2Waited = false;
+    const p1 = withDirectoryLock(dirUpper, async () => {
+      lock1Active = true;
+      await new Promise((r) => setTimeout(r, 60));
+      lock1Active = false;
+    });
+    const p2 = withDirectoryLock(dirUpper, async () => {
+      assert.equal(lock1Active, false, "同一工作目录绝对不能并发穿透排队锁！");
+      lock2Waited = true;
+    });
+    await Promise.all([p1, p2]);
+    assert.equal(lock2Waited, true);
+    console.log("  -> PASS: POSIX 规范路径锁完全互斥，排队机制严密生效");
   }
-
-  // 模拟两个并发任务分别使用大写和小写路径尝试获取锁
-  let lock1Active = false;
-  let lock2Waited = false;
-  const p1 = withDirectoryLock(dirUpper, async () => {
-    lock1Active = true;
-    await new Promise((r) => setTimeout(r, 60));
-    lock1Active = false;
-  });
-  const p2 = withDirectoryLock(dirLower, async () => {
-    // 当 p2 获取到锁时，p1 必须已经释放
-    assert.equal(lock1Active, false, "路径大小写别名绝不能并发穿透排队锁！");
-    lock2Waited = true;
-  });
-  await Promise.all([p1, p2]);
-  assert.equal(lock2Waited, true);
-  console.log("  -> PASS: 大小写别名路径锁完全互斥，排队机制严密生效");
 
   // 21. 反例 21：UTF-8 多字节字符跨 Chunk 切片损坏防御
   console.log("\n[Test 21] 验证 StreamLineParser 跨 Chunk UTF-8 多字节字符解码不乱码...");
