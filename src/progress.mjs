@@ -154,8 +154,17 @@ const EXPLICIT_IN_PROGRESS = /(?:正在(?:排查|修复|检查|处理|构建|调
 // 中途求助、请示、疑问
 const ASKING_OR_HELP = /(?:求助|请示|询问|等待回复|确认是否|心跳汇报|\bhelp\b|\bquestion\b|\bproceed\?)/i;
 
+// 条件、从句、假设或未来时态修饰（如：“完成后再...”、“完成之后请...”、“预计...还需...”）
+const CONDITIONAL_OR_FUTURE_COMPLETION = /(?:(?:(?:待|等|当|若|如果|在)?(?:[^\n。！？]{0,8}?)(?:完成|交付|完工|搞定|通过)(?:之后|后再|后请|时再|之时)?(?:再|才|然后|请|即可|通知|汇报))|(?:(?:预计|预估|估算|大概|可能)(?:[^\n。！？]{0,20}?)(?:还需要|还需|尚需|耗时))|\b(?:if|when|after|until)\s+.*?\b(?:completed|done|finished)\b)/i;
+
+// 局部步骤、中间进度推进声明（非最终全量交付，如：“已完成第一步，接下来执行第二步”）
+const PARTIAL_STEP_PROGRESS = /(?:已(?:完成|交付|执行)(?:第[一二三四五六七八九十\d]+步|阶段[一二三四五六七八九十\d]+|部分任务|前期|初步|第一轮)(?:[，,、\s]*)(?:[^\n。！？]{0,10}?)(?:接下来|随后|继续|下一步|进行下一步|推进|开始)|\bpartially\s+completed\b|\bstep\s+\d+\s+done\b)/i;
+
+// 依赖其他代理、等待审计/验收/裁判（如：“正在审计中”、“等待...结果”）
+const PENDING_AUDIT_OR_DEPENDENCY = /(?:(?:正在|还在|等待|需等|待)(?:[^\n。！？]{0,12}?)(?:审计|复核|评审|验收|验证|裁决|确认)|\bawaiting\s+(?:audit|review|verification)\b|\baudit(?:ing)?\s+in\s+progress\b)/i;
+
 // 强完工交付证据（支持副词修饰、动宾短语与英文标准交付表述）
-const EXPLICIT_COMPLETION_CLAIM = /(?:(?:已|全部|已经|任务|均已|顺利|成功)(?:[^\n，。！？]{0,8}?)(?:完成|交付|完工|搞定|闭环)|已交付成果|工作已结束|全部测试通过|全部用例通过|VICTORY\s+CONFIRMED|all\s+tasks?\s+completed|successfully\s+(?:completed|delivered|finished)|(?:work|implementation)\s+(?:done|completed)|已生成\s*(?:[\w.-]+\/)*handoff\.md)/i;
+const EXPLICIT_COMPLETION_CLAIM = /(?:已(?:全部|顺利|成功)?(?:完成|交付|完工|搞定|闭环)|(?:全部|所有|整项|整体|项目|均已|顺利|成功)(?:[^\n，。！？]{0,8}?)(?:完成|交付|完工|搞定|闭环)|已交付成果|工作已结束|全部测试通过|全部用例通过|VICTORY\s+CONFIRMED|all\s+tasks?\s+completed|successfully\s+(?:completed|delivered|finished)|(?:work|implementation)\s+(?:done|completed)|已生成\s*(?:[\w.-]+\/)*handoff\.md)/i;
 
 /**
  * 校验文本中是否具备确定性、无可争议的完工交付证据
@@ -173,7 +182,12 @@ export function isExplicitlyCompleted(text) {
     return false;
   }
 
-  // 2. 必须具备不可动摇的强完工交付声明
+  // 2. 若包含条件/未来时态修饰、局部步序推进、等待审计/依赖，一票否决
+  if (CONDITIONAL_OR_FUTURE_COMPLETION.test(str) || PARTIAL_STEP_PROGRESS.test(str) || PENDING_AUDIT_OR_DEPENDENCY.test(str)) {
+    return false;
+  }
+
+  // 3. 必须具备不可动摇的强完工交付声明
   return EXPLICIT_COMPLETION_CLAIM.test(str);
 }
 

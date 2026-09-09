@@ -12,7 +12,8 @@ process.env.ANTIGRAVITY_MCP_DATA_DIR = path.join(tempDir, "data");
 
 const { parseTranscript, parseLocalTranscript, evaluateSubagentStatus, formatToolAction, getTaskProgress } = await import("../src/progress.mjs");
 const { persistJob, restorePersistedJobs, JOBS_DIR } = await import("../src/storage.mjs");
-const { withDirectoryLock } = await import("../src/directory-lock.mjs");
+const { withDirectoryLock, normalizeDirectoryKey } = await import("../src/directory-lock.mjs");
+const { StreamLineParser } = await import("../src/stream-transport.mjs");
 
 assert(JOBS_DIR.startsWith(tempDir), `测试 JOBS_DIR 必须被严格隔离至临时沙箱目录: ${JOBS_DIR}`);
 
@@ -522,7 +523,118 @@ try {
   assert.equal(dynamicParseCancelled.subagents[0].status, "cancelled", "父状态变为 cancelled 时，子代理必须即时收敛为 cancelled，绝不能被旧缓存的 running 覆盖！");
   console.log("  -> PASS: 父任务终态穿透即时收敛生效");
 
-  console.log("\n[All Tests Passed] 全部 18 项专项反例测试 100% 成功通过！\n");
+  // 19. 反例 19：完成状态文本猜测误判与审计等待误标（一票否决规则）
+  console.log("\n[Test 19] 验证完成状态一票否决规则（未来时态、分步过渡与等待依赖绝不误标完成）...");
+  const counterPhrases = [
+    "我们在完成后再通知您结果",
+    "预计全部测试通过还需10分钟左右",
+    "已完成第一步，接下来开始执行第二步",
+    "已完成初步代码实现，等待审计员完成独立审查后推进下一步",
+    "等待独立审计员审查交付物...",
+  ];
+  for (const phrase of counterPhrases) {
+    const mockParsed = {
+      conversation_id: `test-veto-${Math.random()}`,
+      currentStep: 5,
+      lastTool: null,
+      lastEntry: {
+        step_index: 5,
+        type: "PLANNER_RESPONSE",
+        content: phrase,
+      },
+    };
+    const status = evaluateSubagentStatus(mockParsed, new Set(), "running");
+    assert.equal(status, "running", `短语 "${phrase}" 绝对不能被误判为 completed！`);
+  }
+  // 正向对比：明确交付成果
+  const validCompleted = {
+    conversation_id: "valid-completed",
+    currentStep: 6,
+    lastTool: null,
+    lastEntry: {
+      step_index: 6,
+      type: "PLANNER_RESPONSE",
+      content: "任务已全部完成，交付成果如下：已通过所有测试，输出文件已验证。",
+    },
+  };
+  assert.equal(evaluateSubagentStatus(validCompleted, new Set(), "running"), "completed", "明确交付成果应当正确判定为 completed");
+  console.log("  -> PASS: 4 种完成误判反例与等待审计均被精准拦截，保持 running");
+
+  // 20. 反例 20：Windows 路径大小写别名并发锁穿透防御
+  console.log("\n[Test 20] 验证 Windows 路径大小写别名排队锁归一化与并发排队...");
+  const dirUpper = path.join(tempDir, "CaseTest", "SubDir");
+  const dirLower = path.join(tempDir, "casetest", "subdir");
+  fs.mkdirSync(dirUpper, { recursive: true });
+
+  const keyUpper = normalizeDirectoryKey(dirUpper);
+  const keyLower = normalizeDirectoryKey(dirLower);
+  if (process.platform === "win32") {
+    assert.equal(keyUpper, keyLower, "Windows 下不同大小写的同一物理路径必须归一化为相同的锁键名！");
+  }
+
+  // 模拟两个并发任务分别使用大写和小写路径尝试获取锁
+  let lock1Active = false;
+  let lock2Waited = false;
+  const p1 = withDirectoryLock(dirUpper, async () => {
+    lock1Active = true;
+    await new Promise((r) => setTimeout(r, 60));
+    lock1Active = false;
+  });
+  const p2 = withDirectoryLock(dirLower, async () => {
+    // 当 p2 获取到锁时，p1 必须已经释放
+    assert.equal(lock1Active, false, "路径大小写别名绝不能并发穿透排队锁！");
+    lock2Waited = true;
+  });
+  await Promise.all([p1, p2]);
+  assert.equal(lock2Waited, true);
+  console.log("  -> PASS: 大小写别名路径锁完全互斥，排队机制严密生效");
+
+  // 21. 反例 21：UTF-8 多字节字符跨 Chunk 切片损坏防御
+  console.log("\n[Test 21] 验证 StreamLineParser 跨 Chunk UTF-8 多字节字符解码不乱码...");
+  const parsedLines = [];
+  const parser = new StreamLineParser((event, rawLine) => parsedLines.push(rawLine));
+
+  const chineseText = '{"event":"assistant","message":{"content":"测试中文字符串😊持续输出"}}\n';
+  const fullBuf = Buffer.from(chineseText, "utf8");
+
+  // 将 Buffer 故意在某个多字节字符的中间截断
+  const splitPos = fullBuf.indexOf(Buffer.from("串", "utf8")) + 1; // 切在 "串" 字符的第 1 个字节后
+  const chunk1 = fullBuf.subarray(0, splitPos);
+  const chunk2 = fullBuf.subarray(splitPos);
+
+  parser.feed(chunk1);
+  parser.feed(chunk2);
+
+  assert.equal(parsedLines.length, 1, "必须完整输出 1 行");
+  assert(!parsedLines[0].includes("\ufffd"), "解码结果绝对不能包含 Unicode 替换字符 \\ufffd 乱码！");
+  const parsedObj = JSON.parse(parsedLines[0]);
+  assert.equal(parsedObj.message.content, "测试中文字符串😊持续输出", "中文字符串必须逐字逐字节完全保真");
+  console.log("  -> PASS: UTF-8 跨数据块切片解码保真，无任何乱码撕裂");
+
+  // 22. 反例 22：任务持久化与恢复中 stream 模式与轮数保存
+  console.log("\n[Test 22] 验证 persistJob 与 restorePersistedJobs 完整保存与恢复 sessionMode 与 numTurns...");
+  const streamJobId = "persist-stream-test-job";
+  const mockStreamJob = {
+    jobId: streamJobId,
+    sessionMode: "stream",
+    numTurns: 3,
+    state: "running",
+    startedAt: new Date().toISOString(),
+    completedAt: null,
+    invocation: { prompt: "持久化测试", cwd: tempDir },
+    attempts: 1,
+    result: { status: "SUCCESS", num_turns: 3 },
+  };
+
+  persistJob(mockStreamJob);
+  const restoredStreamMap = restorePersistedJobs();
+  assert(restoredStreamMap.has(streamJobId), "持久化任务必须能被 restorePersistedJobs 成功还原");
+  const restoredStreamJob = restoredStreamMap.get(streamJobId);
+  assert.equal(restoredStreamJob.sessionMode, "stream", "sessionMode 必须被正确固化并还原！");
+  assert.equal(restoredStreamJob.numTurns, 3, "numTurns 必须被正确固化并还原！");
+  console.log("  -> PASS: stream 模式与交互轮数持久化还原完整无缺");
+
+  console.log("\n[All Tests Passed] 全部 22 项专项反例测试 100% 成功通过！\n");
 } finally {
   fs.rmSync(tempDir, { recursive: true, force: true });
 }

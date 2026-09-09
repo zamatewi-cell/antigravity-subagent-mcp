@@ -1,4 +1,6 @@
-﻿/**
+import { StringDecoder } from "node:string_decoder";
+
+/**
  * Antigravity 交互式流传输协议（Interactive Stream Transport）核心编解码与行流解析器
  * 负责 Google Antigravity CLI stream-json 模式的 NDJSON 消息封包、拆包与流式状态缓冲
  */
@@ -31,7 +33,7 @@ export function encodeStreamUserMessage(content) {
 }
 
 /**
- * 结构化 NDJSON 行流解析器，解决 TCP 管道数据分包、粘包与断行问题
+ * 结构化 NDJSON 行流解析器，解决 TCP 管道数据分包、粘包、断行与多字节 UTF-8 跨块撕裂问题
  */
 export class StreamLineParser {
   /**
@@ -39,15 +41,17 @@ export class StreamLineParser {
    */
   constructor(onLine) {
     this.buffer = "";
+    this.decoder = new StringDecoder("utf8");
     this.onLine = typeof onLine === "function" ? onLine : () => {};
   }
 
   /**
-   * 灌入从 child.stdout 收到的原始数据块
+   * 灌入从 child.stdout 收到的原始数据块（支持 Buffer 切片内部跨字节保留）
    * @param {Buffer|string} chunk 
    */
   feed(chunk) {
-    this.buffer += chunk.toString("utf8");
+    if (chunk === undefined || chunk === null) return;
+    this.buffer += typeof chunk === "string" ? chunk : this.decoder.write(chunk);
     let newlineIndex;
     while ((newlineIndex = this.buffer.indexOf("\n")) !== -1) {
       const rawLine = this.buffer.slice(0, newlineIndex);
@@ -57,9 +61,10 @@ export class StreamLineParser {
   }
 
   /**
-   * 刷新流尾部未换行的数据
+   * 刷新流尾部未换行的数据及多字节残余
    */
   flush() {
+    this.buffer += this.decoder.end();
     if (this.buffer.trim()) {
       this._processLine(this.buffer);
     }

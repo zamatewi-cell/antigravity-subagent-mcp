@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/server";
 import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
@@ -14,7 +15,7 @@ import { persistJob, restorePersistedJobs } from "./storage.mjs";
 import { startDashboardServer, openInBrowser } from "./dashboard.mjs";
 import { withDirectoryLock } from "./directory-lock.mjs";
 
-const SERVER_VERSION = "1.5.1";
+const SERVER_VERSION = "1.5.2";
 const DEFAULT_MODEL = process.env.ANTIGRAVITY_DEFAULT_MODEL || "gemini-3.8-flash-high";
 const DEFAULT_PERMISSION_MODE = process.env.ANTIGRAVITY_PERMISSION_MODE || "auto-approve";
 const DEFAULT_TIMEOUT_SECONDS = 300;
@@ -248,9 +249,13 @@ function launchAgy(input, jobId = randomUUID()) {
   jobs.set(jobId, job);
   persistJob(job);
 
+  const stdoutDecoder = new StringDecoder("utf8");
+  const stderrDecoder = new StringDecoder("utf8");
+
   const append = (field, chunk) => {
-    if (job.stopReason) return;
-    job[field] += chunk.toString("utf8");
+    if (job.stopReason || chunk === undefined || chunk === null) return;
+    const text = typeof chunk === "string" ? chunk : (field === "stdout" ? stdoutDecoder.write(chunk) : stderrDecoder.write(chunk));
+    job[field] += text;
     if (Buffer.byteLength(job.stdout) + Buffer.byteLength(job.stderr) > MAX_CAPTURE_BYTES) {
       job.stderr += "\nMCP bridge stopped AGY because captured output exceeded 16 MiB.";
       void stopJob(job, "output_limit");
@@ -290,6 +295,8 @@ function launchAgy(input, jobId = randomUUID()) {
       if (job.completedAt) return;
       if (job.timeoutHandle) clearTimeout(job.timeoutHandle);
       if (job.stopPromise) await job.stopPromise;
+      job.stdout += stdoutDecoder.end();
+      job.stderr += stderrDecoder.end();
       if (streamParser) streamParser.flush();
       const parsed = isStream
         ? (job.lastTurnResult || job.result)
@@ -324,6 +331,9 @@ function launchAgy(input, jobId = randomUUID()) {
         job.state = "success";
       } else {
         job.state = "error";
+      }
+      if (job.progress && typeof job.progress === "object") {
+        job.progress.phase = job.state === "success" ? "COMPLETED" : job.state.toUpperCase();
       }
       job.completedAt = new Date().toISOString();
       persistJob(job);

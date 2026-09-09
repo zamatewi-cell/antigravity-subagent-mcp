@@ -102,7 +102,7 @@ try {
   assert.equal(statusResp.statusCode, 200);
   const statusData = JSON.parse(statusResp.body);
   assert.equal(statusData.status, "OK");
-  assert.equal(statusData.version, "1.5.1");
+  assert.equal(statusData.version, "1.5.2");
   assert.equal(statusData.total_jobs, 2);
   assert.equal(statusData.active_jobs, 2);
   console.log("  -> PASS: 状态接口统计准确无误");
@@ -233,6 +233,28 @@ try {
     sseReq.end();
   });
   console.log("  -> PASS: SSE 实时流推送握手与广播周期验证正常");
+
+  // 8. 验证 formatJobDetail 在 stream 模式下完整保留 subagents 且回退 numTurns
+  console.log("\n[Test 8] 验证 formatJobDetail 深度合并子代理树与 numTurns...");
+  const streamJobWithSub = {
+    jobId: "mock-stream-sub",
+    sessionMode: "stream",
+    state: "running",
+    startedAt: new Date().toISOString(),
+    invocation: { prompt: "test stream sub" },
+    progress: {
+      phase: "THINKING",
+      current_step: 3,
+      subagents: [{ role: "Worker A", step: 12, status: "completed" }],
+    },
+    numTurns: 2,
+  };
+  const detailed = formatJobDetail(streamJobWithSub);
+  assert.equal(detailed.sessionMode, "stream");
+  assert.equal(detailed.numTurns, 2);
+  assert.equal(detailed.progress.subagents.length, 1);
+  assert.equal(detailed.progress.subagents[0].role, "Worker A");
+  console.log("  -> PASS: formatJobDetail 完整保留 subagents 与 numTurns");
 
   console.log("\n[All Tests Passed] Dashboard 自动化测试全项 100% 通过！\n");
 } finally {

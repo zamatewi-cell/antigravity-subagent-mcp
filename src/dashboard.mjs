@@ -14,7 +14,7 @@ const WEB_ROOT = path.resolve(__dirname, "web");
 const HTML_FILE = path.join(WEB_ROOT, "index.html");
 
 const DEFAULT_PORT = Number(process.env.ANTIGRAVITY_DASHBOARD_PORT) || 3721;
-const DASHBOARD_VERSION = "1.5.1";
+const DASHBOARD_VERSION = "1.5.2";
 
 // 物理日志读取尾部内存缓存：logFile -> { mtimeMs, size, tail }，避免每秒重复打开同步读取
 const logTailCache = new Map();
@@ -31,13 +31,28 @@ export function formatJobDetail(job) {
   const isTerminal = ["completed", "success", "error", "cancelled", "interrupted"].includes(job.state);
   let progress = isTerminal && job._cachedProgress ? job._cachedProgress : null;
   if (!progress) {
-    if (job.progress && typeof job.progress === "object" && job.progress.phase) {
-      progress = job.progress;
+    // 始终先从 transcript 获取完整的子代理树与微观动作基线
+    const baseline = getTaskProgress(job) || {};
+    // 如果运行时有 stream 事件流产生的浅层增量，进行深度融合，绝不二选一丢失子代理树
+    if (job.progress && typeof job.progress === "object") {
+      progress = {
+        ...baseline,
+        ...job.progress,
+        // 关键字段确保保留 baseline 中从 transcript 动态解析出的完整集合
+        subagents: (baseline.subagents && baseline.subagents.length > 0) ? baseline.subagents : (job.progress.subagents || []),
+        dag_topology: baseline.dag_topology || job.progress.dag_topology || null,
+        recent_activities: (baseline.recent_activities && baseline.recent_activities.length > 0) ? baseline.recent_activities : (job.progress.recent_activities || []),
+      };
     } else {
-      progress = getTaskProgress(job);
-      if (isTerminal) {
-        job._cachedProgress = progress;
+      progress = baseline;
+    }
+
+    // 终态生命周期约束：一旦任务进入终态，必须消除 IDLE_AWAITING_INPUT 等过期运行阶段
+    if (isTerminal) {
+      if (!progress.phase || progress.phase === "IDLE_AWAITING_INPUT" || progress.phase === "WAITING_INPUT" || progress.phase === "EXECUTING") {
+        progress.phase = job.state === "success" ? "COMPLETED" : job.state.toUpperCase();
       }
+      job._cachedProgress = progress;
     }
   }
 
@@ -85,7 +100,7 @@ export function formatJobDetail(job) {
     },
     attempts: job.attempts || 1,
     sessionMode: job.sessionMode || job.invocation?.session_mode || "print",
-    numTurns: job.numTurns || 0,
+    numTurns: job.numTurns ?? job.result?.num_turns ?? 0,
     result: job.result || null,
     progress: {
       phase: progress?.phase || "UNKNOWN",

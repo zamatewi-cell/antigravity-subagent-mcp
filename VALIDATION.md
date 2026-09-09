@@ -1,9 +1,9 @@
-# 1.5.1 验证记录与收官交付报告 (Feature Freeze)
+# 1.5.2 验证记录与真实复测闭环收官报告 (Final GA)
 
 验证日期：2026-09-09  
-服务版本：`v1.5.1` (收官终态冻结版本)  
+服务版本：`v1.5.2` (状态可信与看板全貌闭环版)  
 默认模型：`gemini-3.8-flash-high`  
-项目状态：**Feature Freeze (全面功能冻结，停止边际特性蔓延)**
+项目状态：**Final GA (状态完全可信、看板全貌闭环、严谨收官)**
 
 ---
 
@@ -25,6 +25,7 @@
 | **v1.4.0** | **企业级四大核心特性飞跃**：<br>1. **历史任务分页与过滤 (R1)**：`GET /api/jobs` 支持 `page` / `limit` / `state` / `search`，标准化分页响应与无参向后兼容；<br>2. **SSE 差异增量流与 Delta Patching (R2)**：首发 snapshot + 变动事件 (`job_created`/`job_updated`/`job_removed`) + `:keep-alive` 保活，前端内存字典局部打补丁消除全量重刷；<br>3. **原生 SVG Agent DAG 拓扑 (R3)**：有向拓扑元数据注入 (`parentId`/`depth`/`childrenIds`/`nodeType`)，纯原生 SVG 贝塞尔连线与 CSS 呼吸流光；<br>4. **Human-in-the-loop 软介入 (R4)**：子进程 `stdio` 保留，安全 `sendInputToJob` 与 `POST /api/jobs/:id/interact` 接口及前端控制台。 | `test/pagination.test.mjs` (12/12 PASS), `test/sse-delta.test.mjs` (6/6 PASS), `test/dag-topology.test.mjs` (4/4 PASS), `test/hitl.test.mjs` (7/7 PASS), `npm run test:offline` (全部 10 套离线套件 100% 通过) |
 | **v1.5.0** | **原生双向交互流传输管道与真实 AGY E2E 闭环 (HITL GA)**：<br>1. **双轨执行架构 (Dual-Track)**：常规单次任务保持 `--print` 稳定委托，交互任务启用 `--input-format stream-json --output-format stream-json`；<br>2. **官方 NDJSON 协议规范接入**：stdout 捕获 `event: init` 提取真实 `conversation_id`，行缓冲流式解析 `step_update` 与 `result`；<br>3. **同进程同会话多轮驱动**：首轮完成后进程保持存活，通过 stdin/Dashboard `/interact` 注入第二轮并递增 `numTurns`；<br>4. **真实 AGY 端到端闭环**：本地真实 `agy.exe` 跑通“第 1 轮 prompt → Web 交互介入 → 同会话第 2 轮完成 → 优雅退出 (Exit 0)”。 | `test/hitl-stream-transport.test.mjs` (5/5 PASS), `test/hitl-real-agy.e2e.test.mjs` (真实 AGY E2E 闭环 PASS), `npm run test:offline` (全部 11 套离线套件 100% 通过) |
 | **v1.5.1** | **生产优雅结束入口补全与 Stream 状态机解耦 (Feature Freeze 收官)**：<br>1. **公开生产结束工具 `finish_gemini_task`**：开放 MCP 工具与 Dashboard `POST /api/jobs/:id/finish`，安全 `stdin.end()` 优雅终结流式会话；<br>2. **`interact_gemini_task` 终轮合并支持**：支持 `end_session: true` 单步完成最后提示词并关闭管道；<br>3. **Stream close handler 解耦**：流模式下退出不再走针对单轮的 `parseAgyJson`（避免多行 NDJSON 误判），直接从 `lastTurnResult` 收敛 `success`；<br>4. **完整穿透生产链路真实 E2E**：真实 MCP Client 调用生产工具链验证多轮交互与退出码 0，全面确立 **Feature Freeze 冻结守则**。 | `test/hitl-stream-transport.test.mjs` (8/8 PASS), `test/hitl-real-agy.e2e.test.mjs` (真实生产 MCP 客户端穿透 100% PASS), `npm run test:offline` (全部 11 套离线套件 100% 通过) |
+| **v1.5.2** | **状态完全可信与看板全貌闭环修复 (Final GA)**：<br>1. **UTF-8 多字节字符跨 chunk 解码修复**：在 stdout/stderr 与 `StreamLineParser` 引入 `StringDecoder`，彻底杜绝中文/Emoji 撕裂与 `\ufffd` 乱码；<br>2. **Windows 路径大小写别名锁归一化**：新增 `normalizeDirectoryKey` 在 Windows 下统一小写化，彻底防御 `D:/...` 与 `d:/...` 并发穿透排队锁；<br>3. **任务持久化固化 sessionMode 与 numTurns**：磁盘存储与启动恢复完整固化流式任务属性，杜绝重启后轮数归零；<br>4. **stream 模式子代理树保留与过期 phase 收敛**：`formatJobDetail` 深度合并真实子代理树与 stream 运行时状态，终态时清理过期的 `AWAITING_INPUT`；<br>5. **完成状态文本一票否决规则**：引入未来时态、分步过渡与等待审计一票否决正则，杜绝“完成后再通知”、“还需10分钟”、“第一步接下来第二步”与等待审计被误判为已完成；<br>6. **Web 看板全貌闭环**：抽离 `renderSubagentGrid` 实现子卡片矩阵与 DAG 毫秒级同步、修复时间线 100 条满载滑动断更、侧边栏搜索/状态过滤/分页条接入、新增【完成并收敛会话】操作按钮。 | `test/counterexamples.test.mjs` (全部 22 项专项反例 100% PASS), `test/dashboard.test.mjs` (8/8 PASS), `npm run test:offline` (11 套套件 100% PASS) |
 
 ---
 
@@ -51,12 +52,16 @@
 - [x] **Test 16**: 验证基于文件 `mtime` 和 `size` 的 transcript 底层解析结果缓存与真 LRU 机制，大幅削减每秒广播的重复 I/O。
 - [x] **Test 17**: 验证父 transcript 缓存不冻结子代理的实时步数与动作（根治缓存回归，动态穿透）。
 - [x] **Test 18**: 验证父任务取消时子代理状态收敛穿透缓存。
+- [x] **Test 19**: 验证完成状态一票否决规则（未来时态、分步过渡与等待依赖绝不误标完成）。
+- [x] **Test 20**: 验证 Windows 路径大小写别名排队锁归一化与并发排队，彻底防御大小写穿透。
+- [x] **Test 21**: 验证 StreamLineParser 跨 Chunk UTF-8 多字节字符解码不乱码，中文与 Emoji 逐字保真。
+- [x] **Test 22**: 验证 persistJob 与 restorePersistedJobs 完整保存与恢复 sessionMode 与 numTurns。
 - [x] **测试沙箱严格隔离**: 测试均基于 `mkdtempSync` 创建沙箱并动态 `await import` 注入 `process.env.ANTIGRAVITY_MCP_DATA_DIR`，内置 `assert(JOBS_DIR.startsWith(tempDir))` 防御性断言，杜绝 ESM 静态 import 提升导致的生产目录污染。
 
 ### 2. 独立实时可视化看板测试 (`node test/dashboard.test.mjs`)
 - [x] **Test 1**: 启动轻量原生 HTTP 服务（默认端口 3721，冲突时自增）。
 - [x] **Test 2**: 静态单页交付正常，验证现代暗黑前端 HTML 结构完整。
-- [x] **Test 3**: `/api/status` 服务状态与指标统计准确无误（版本更新至 1.4.0）。
+- [x] **Test 3**: `/api/status` 服务状态与指标统计准确无误（版本更新至 1.5.2）。
 - [x] **Test 3.1**: CORS 安全访问控制收紧验证，未受信任外部来源绝不反射 `*`，本地合法域正常授权。
 - [x] **Test 3.2**: 跨站恶意 POST 请求拦截（403 Forbidden），防御 CSRF。
 - [x] **Test 4**: `/api/jobs` 任务列表与 progress 序列化结构正确。

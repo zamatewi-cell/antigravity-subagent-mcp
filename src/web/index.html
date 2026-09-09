@@ -145,6 +145,72 @@
       letter-spacing: 0.8px;
       color: var(--text-muted);
     }
+    .sidebar-filters {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border-subtle);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      background: rgba(15, 23, 42, 0.4);
+    }
+    .sidebar-search-input {
+      width: 100%;
+      background: var(--bg-base);
+      border: 1px solid var(--border-subtle);
+      border-radius: 6px;
+      color: var(--text-main);
+      font-size: 12px;
+      padding: 6px 10px;
+      outline: none;
+      box-sizing: border-box;
+      font-family: var(--font-sans);
+    }
+    .sidebar-search-input:focus {
+      border-color: var(--cyan);
+    }
+    .sidebar-select {
+      width: 100%;
+      background: var(--bg-base);
+      border: 1px solid var(--border-subtle);
+      border-radius: 6px;
+      color: var(--text-main);
+      font-size: 12px;
+      padding: 6px 8px;
+      outline: none;
+      box-sizing: border-box;
+      cursor: pointer;
+    }
+    .sidebar-select:focus {
+      border-color: var(--cyan);
+    }
+    .sidebar-pagination {
+      padding: 10px 14px;
+      border-top: 1px solid var(--border-subtle);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 11px;
+      background: var(--bg-surface);
+      font-family: var(--font-mono);
+    }
+    .page-btn {
+      background: var(--bg-card);
+      border: 1px solid var(--border-subtle);
+      color: var(--text-muted);
+      padding: 4px 8px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 11px;
+      transition: all 0.15s;
+    }
+    .page-btn:hover:not(:disabled) {
+      color: var(--text-main);
+      border-color: var(--cyan);
+    }
+    .page-btn:disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+    }
     .task-list {
       flex: 1;
       overflow-y: auto;
@@ -308,6 +374,15 @@
     }
     .btn-danger:hover {
       background-color: var(--red);
+      color: #fff;
+    }
+    .btn-success {
+      background-color: var(--green-dim);
+      color: var(--green);
+      border-color: rgba(16, 185, 129, 0.3);
+    }
+    .btn-success:hover {
+      background-color: var(--green);
       color: #fff;
     }
     .btn-secondary {
@@ -834,7 +909,7 @@
     <div class="brand">
       <div class="brand-logo">AG</div>
       <div class="brand-title">Antigravity Subagent Monitor</div>
-      <div class="brand-badge">v1.4.0</div>
+      <div class="brand-badge">v1.5.2</div>
     </div>
     <div class="header-status">
       <div id="liveBadge" class="live-indicator">
@@ -854,8 +929,26 @@
         <div class="sidebar-title">任务历史 / 队列</div>
         <span id="taskCountBadge" style="font-size: 11px; font-family: var(--font-mono); color: var(--text-dim);">0 个任务</span>
       </div>
+      <!-- 搜索与状态过滤 -->
+      <div class="sidebar-filters">
+        <input type="text" id="taskSearchInput" class="sidebar-search-input" placeholder="按 Prompt 或 ID 过滤..." oninput="handleSearchInput(event)" />
+        <select id="taskStateFilter" class="sidebar-select" onchange="handleStateFilterChange(event)">
+          <option value="">全部状态 (All States)</option>
+          <option value="running">运行中 (running)</option>
+          <option value="queued">排队中 (queued)</option>
+          <option value="success">成功 (success)</option>
+          <option value="error">失败 (error)</option>
+          <option value="cancelled">已取消 (cancelled)</option>
+        </select>
+      </div>
       <div id="taskList" class="task-list">
         <div style="padding: 20px; text-align: center; color: var(--text-dim); font-size: 12px;">加载中...</div>
+      </div>
+      <!-- 侧边栏分页栏 -->
+      <div class="sidebar-pagination">
+        <button id="btnPrevPage" class="page-btn" onclick="goToPrevPage()" disabled>◀ 上一页</button>
+        <span id="pageInfo" style="color: var(--text-dim);">1 / 1</span>
+        <button id="btnNextPage" class="page-btn" onclick="goToNextPage()" disabled>下一页 ▶</button>
       </div>
     </div>
 
@@ -874,7 +967,8 @@
         <div class="job-banner">
           <div class="job-title-row">
             <div class="job-prompt" id="bannerPrompt"></div>
-            <div class="job-actions">
+            <div class="job-actions" style="display: flex; gap: 8px;">
+              <button id="finishBtn" class="btn btn-success" onclick="finishCurrentJob()" style="display: none;">完成并收敛会话</button>
               <button id="cancelBtn" class="btn btn-danger" onclick="cancelCurrentJob()">终止此任务</button>
             </div>
           </div>
@@ -931,7 +1025,7 @@
                 <div class="hitl-title">
                   <span style="color: var(--cyan);">⚡</span>
                   人机在环软介入控制台 (Human-in-the-Loop Console)
-                  <span style="font-size: 10px; padding: 2px 6px; background: rgba(56,189,248,0.15); border: 1px solid rgba(56,189,248,0.3); border-radius: 4px; color: var(--cyan); margin-left: 6px; font-weight: 500;">Experimental Stream Channel</span>
+                  <span id="hitlChannelTag" style="font-size: 10px; padding: 2px 6px; background: rgba(56,189,248,0.15); border: 1px solid rgba(56,189,248,0.3); border-radius: 4px; color: var(--cyan); margin-left: 6px; font-weight: 500;">Interactive Stream Channel</span>
                 </div>
                 <div class="hitl-channel-badge hitl-channel-ready" id="hitlStatusBadge">
                   <span style="display:inline-block; width:6px; height:6px; background:currentColor; border-radius:50%;"></span>
@@ -1001,6 +1095,63 @@
     let selectedSubagentIndex = null;
     let currentTab = "subagents";
     let lastSeq = 0;
+
+    let currentFilter = {
+      page: 1,
+      limit: 20,
+      state: "",
+      search: "",
+    };
+    let currentPagination = {
+      total: 0,
+      page: 1,
+      limit: 20,
+      totalPages: 1,
+      hasMore: false,
+    };
+    let searchDebounceTimer = null;
+
+    function handleSearchInput(e) {
+      clearTimeout(searchDebounceTimer);
+      searchDebounceTimer = setTimeout(() => {
+        currentFilter.search = e.target.value.trim();
+        currentFilter.page = 1;
+        fetchJobs();
+      }, 300);
+    }
+
+    function handleStateFilterChange(e) {
+      currentFilter.state = e.target.value;
+      currentFilter.page = 1;
+      fetchJobs();
+    }
+
+    function goToPrevPage() {
+      if (currentFilter.page > 1) {
+        currentFilter.page--;
+        fetchJobs();
+      }
+    }
+
+    function goToNextPage() {
+      if (currentPagination.hasMore) {
+        currentFilter.page++;
+        fetchJobs();
+      }
+    }
+
+    function updatePaginationUI(pagination) {
+      if (!pagination) return;
+      currentPagination = pagination;
+      const pageInfo = document.getElementById("pageInfo");
+      const btnPrev = document.getElementById("btnPrevPage");
+      const btnNext = document.getElementById("btnNextPage");
+      if (pageInfo) {
+        pageInfo.innerText = `${pagination.page} / ${pagination.totalPages || 1} (共 ${pagination.total} 条)`;
+      }
+      if (btnPrev) btnPrev.disabled = pagination.page <= 1;
+      if (btnNext) btnNext.disabled = !pagination.hasMore;
+    }
 
     // 辅助：从 jobsById 同步更新 currentJobs 数组（按 startedAt 降序）
     function syncJobsArray() {
@@ -1118,6 +1269,73 @@
     }
 
     /**
+     * 渲染代理卡片矩阵（项目主编排器 + 全量协同子代理）
+     */
+    function renderSubagentGrid(job) {
+      const grid = document.getElementById("subagentGrid");
+      if (!grid || !job) return;
+
+      const subagents = job.progress?.subagents || [];
+      const badge = document.getElementById("subagentCountBadge");
+      if (badge) {
+        badge.innerText = subagents.length > 0 ? `${subagents.length} 个子代理` : "主编排器推进";
+      }
+
+      // 始终在网格最前置渲染主编排器卡片
+      const isLeadSelected = selectedSubagentIndex === null;
+      let gridHtml = `
+        <div class="subagent-card ${isLeadSelected ? "selected" : ""}" onclick="selectSubagent(null)" style="border-color: ${isLeadSelected ? "var(--cyan)" : "rgba(14,165,233,0.3)"};">
+          <div class="subagent-card-header">
+            <div class="subagent-role" style="color: var(--cyan);">
+              <span style="display:inline-block; width:6px; height:6px; background:var(--cyan); border-radius:50%;"></span>
+              Lead Orchestrator (项目主编排器)
+            </div>
+            ${renderStatusTag(job.state)}
+          </div>
+          <div class="subagent-action-box">
+            ${formatActionHtml(job.progress?.last_tool ? `[${job.progress.last_tool}] ${job.progress.current_action}` : job.progress?.current_action)}
+          </div>
+          <div class="subagent-footer">
+            <span>步数: Step ${job.progress?.current_step || 0}</span>
+            <span title="${job.conversationId || ""}">ID: ${(job.conversationId || job.jobId || "pending").slice(0, 8)}...</span>
+          </div>
+        </div>
+      `;
+
+      if (subagents.length === 0) {
+        gridHtml += `
+          <div style="padding: 16px 20px; background: var(--bg-card); border-radius: 8px; border: 1px dashed var(--border-subtle); color: var(--text-dim); display: flex; flex-direction: column; justify-content: center; font-size: 12px; line-height: 1.6;">
+            <div>当前阶段由主编排器（Lead Orchestrator）推进。</div>
+            <div style="color: var(--text-muted); font-size: 11px;">在委派多代理团队或派发专项 Worker 后，协同子代理卡片将在此网格动态追加。</div>
+          </div>
+        `;
+      } else {
+        gridHtml += subagents.map((sub, idx) => {
+          const isCardSelected = selectedSubagentIndex === idx;
+          return `
+            <div class="subagent-card ${isCardSelected ? "selected" : ""}" onclick="selectSubagent(${idx})">
+              <div class="subagent-card-header">
+                <div class="subagent-role">
+                  <span style="display:inline-block; width:6px; height:6px; background:var(--cyan); border-radius:50%;"></span>
+                  ${escapeHtml(sub.role || "Subagent")}
+                </div>
+                ${renderStatusTag(sub.status)}
+              </div>
+              <div class="subagent-action-box">
+                ${formatActionHtml(sub.current_action)}
+              </div>
+              <div class="subagent-footer">
+                <span>步数: Step ${sub.step || 0}</span>
+                <span title="${sub.conversation_id || ""}">ID: ${(sub.conversation_id || "pending").slice(0, 8)}...</span>
+              </div>
+            </div>
+          `;
+        }).join("");
+      }
+      grid.innerHTML = gridHtml;
+    }
+
+    /**
      * 当选中的任务发生变更时，精准更新右侧详情视图中的微观流水与状态
      */
     function patchJobDetailDOM(job) {
@@ -1135,6 +1353,12 @@
         cancelBtn.style.display = isRunning ? "inline-flex" : "none";
       }
 
+      const finishBtn = document.getElementById("finishBtn");
+      if (finishBtn) {
+        const canFinish = isRunning && job.sessionMode === "stream";
+        finishBtn.style.display = canFinish ? "inline-flex" : "none";
+      }
+
       // 2. 阶段成果面板局部刷新
       const resultPanel = document.getElementById("resultPanel");
       const resultContent = document.getElementById("resultContent");
@@ -1147,7 +1371,10 @@
         resultContent.innerText = responseText;
       }
 
-      // 3. 微观流水局部追加 (Append 机制，不刷清已有列表)
+      // 3. 局部更新子代理卡片矩阵（保持卡片和 DAG 步数及状态绝对同步）
+      renderSubagentGrid(job);
+
+      // 4. 微观流水局部更新（基于指纹比对，解决 100 条满载滑动后卡死不追加问题）
       const subagents = job.progress?.subagents || [];
       const isLead = selectedSubagentIndex === null;
       const acts = isLead 
@@ -1156,24 +1383,20 @@
 
       const list = document.getElementById("timelineList");
       if (list) {
-        if (list.children.length === 1 && list.children[0].textContent.includes("暂无微观步骤")) {
-          list.innerHTML = acts.map(act => `<li class="timeline-item">${formatActionHtml(act)}</li>`).join("");
+        if (!acts || acts.length === 0) {
+          list.dataset.fingerprint = "";
+          list.innerHTML = '<li class="timeline-item">暂无微观步骤记录</li>';
         } else {
-          const currentCount = list.children.length;
-          if (acts.length > currentCount) {
-            const newActs = acts.slice(currentCount);
-            for (const act of newActs) {
-              const li = document.createElement("li");
-              li.className = "timeline-item";
-              li.innerHTML = formatActionHtml(act);
-              list.appendChild(li);
-            }
+          const actsFingerprint = acts.map(a => typeof a === "string" ? a : JSON.stringify(a)).join(";;;");
+          if (list.dataset.fingerprint !== actsFingerprint) {
+            list.dataset.fingerprint = actsFingerprint;
+            list.innerHTML = acts.map(act => `<li class="timeline-item">${formatActionHtml(act)}</li>`).join("");
             list.scrollTop = list.scrollHeight;
           }
         }
       }
 
-      // 4. 日志尾部更新 (LogViewer)
+      // 5. 日志尾部更新 (LogViewer)
       const logViewer = document.getElementById("logViewer");
       if (logViewer && job.logTail && logViewer.innerText !== job.logTail) {
         const isAtBottom = (logViewer.scrollHeight - logViewer.scrollTop) <= (logViewer.clientHeight + 50);
@@ -1183,7 +1406,7 @@
         }
       }
 
-      // 5. 原生 DAG 拓扑执行流与人机软介入控制台局部更新
+      // 6. 原生 DAG 拓扑执行流与人机软介入控制台局部更新
       renderDagGraph(job);
       updateHitlConsoleState(job);
     }
@@ -1257,6 +1480,12 @@
       const cancelBtn = document.getElementById("cancelBtn");
       cancelBtn.style.display = isRunning ? "inline-flex" : "none";
 
+      const finishBtn = document.getElementById("finishBtn");
+      if (finishBtn) {
+        const canFinish = isRunning && job.sessionMode === "stream";
+        finishBtn.style.display = canFinish ? "inline-flex" : "none";
+      }
+
       // 阶段交付成果渲染
       const resultPanel = document.getElementById("resultPanel");
       const resultContent = document.getElementById("resultContent");
@@ -1273,61 +1502,7 @@
 
       // 代理矩阵网格（主编排器卡片 + 子代理卡片）
       const subagents = job.progress?.subagents || [];
-      document.getElementById("subagentCountBadge").innerText = subagents.length > 0 ? `${subagents.length} 个子代理` : "主编排器推进";
-      const grid = document.getElementById("subagentGrid");
-
-      // 始终在网格最前置渲染主编排器卡片
-      const isLeadSelected = selectedSubagentIndex === null;
-      let gridHtml = `
-        <div class="subagent-card ${isLeadSelected ? "selected" : ""}" onclick="selectSubagent(null)" style="border-color: ${isLeadSelected ? "var(--cyan)" : "rgba(14,165,233,0.3)"};">
-          <div class="subagent-card-header">
-            <div class="subagent-role" style="color: var(--cyan);">
-              <span style="display:inline-block; width:6px; height:6px; background:var(--cyan); border-radius:50%;"></span>
-              Lead Orchestrator (项目主编排器)
-            </div>
-            ${renderStatusTag(job.state)}
-          </div>
-          <div class="subagent-action-box">
-            ${formatActionHtml(job.progress?.last_tool ? `[${job.progress.last_tool}] ${job.progress.current_action}` : job.progress?.current_action)}
-          </div>
-          <div class="subagent-footer">
-            <span>步数: Step ${job.progress?.current_step || 0}</span>
-            <span title="${job.conversationId || ""}">ID: ${(job.conversationId || job.jobId || "pending").slice(0, 8)}...</span>
-          </div>
-        </div>
-      `;
-
-      if (subagents.length === 0) {
-        gridHtml += `
-          <div style="padding: 16px 20px; background: var(--bg-card); border-radius: 8px; border: 1px dashed var(--border-subtle); color: var(--text-dim); display: flex; flex-direction: column; justify-content: center; font-size: 12px; line-height: 1.6;">
-            <div>当前阶段由主编排器（Lead Orchestrator）推进。</div>
-            <div style="color: var(--text-muted); font-size: 11px;">在委派多代理团队或派发专项 Worker 后，协同子代理卡片将在此网格动态追加。</div>
-          </div>
-        `;
-      } else {
-        gridHtml += subagents.map((sub, idx) => {
-          const isCardSelected = selectedSubagentIndex === idx;
-          return `
-            <div class="subagent-card ${isCardSelected ? "selected" : ""}" onclick="selectSubagent(${idx})">
-              <div class="subagent-card-header">
-                <div class="subagent-role">
-                  <span style="display:inline-block; width:6px; height:6px; background:var(--cyan); border-radius:50%;"></span>
-                  ${escapeHtml(sub.role || "Subagent")}
-                </div>
-                ${renderStatusTag(sub.status)}
-              </div>
-              <div class="subagent-action-box">
-                ${formatActionHtml(sub.current_action)}
-              </div>
-              <div class="subagent-footer">
-                <span>步数: Step ${sub.step || 0}</span>
-                <span title="${sub.conversation_id || ""}">ID: ${(sub.conversation_id || "pending").slice(0, 8)}...</span>
-              </div>
-            </div>
-          `;
-        }).join("");
-      }
-      grid.innerHTML = gridHtml;
+      renderSubagentGrid(job);
 
       // 渲染微观时间线
       renderTimeline(job, subagents);
@@ -1377,9 +1552,40 @@
 
       const list = document.getElementById("timelineList");
       if (!acts || acts.length === 0) {
+        list.dataset.fingerprint = "";
         list.innerHTML = '<li class="timeline-item">暂无微观步骤记录</li>';
       } else {
+        const actsFingerprint = acts.map(a => typeof a === "string" ? a : JSON.stringify(a)).join(";;;");
+        list.dataset.fingerprint = actsFingerprint;
         list.innerHTML = acts.map((act) => `<li class="timeline-item">${formatActionHtml(act)}</li>`).join("");
+      }
+    }
+
+    // 完成并收敛流式交互会话
+    async function finishCurrentJob() {
+      if (!selectedJobId) return;
+      if (!confirm(`确定要完成并收敛任务 ${selectedJobId} 的交互会话吗？`)) return;
+      const finishBtn = document.getElementById("finishBtn");
+      if (finishBtn) {
+        finishBtn.disabled = true;
+        finishBtn.innerText = "收敛中...";
+      }
+      try {
+        const resp = await fetch(`/api/jobs/${selectedJobId}/finish`, { method: "POST" });
+        const data = await resp.json();
+        if (!resp.ok) {
+          alert(data.error || "收敛会话失败");
+          return;
+        }
+        showHitlFeedback("✓ 会话已成功收敛完成", false);
+        fetchJobs();
+      } catch (err) {
+        alert("请求收敛失败：" + err.message);
+      } finally {
+        if (finishBtn) {
+          finishBtn.disabled = false;
+          finishBtn.innerText = "完成并收敛会话";
+        }
       }
     }
 
@@ -1401,16 +1607,32 @@
       }
     }
 
-    // 获取数据
+    // 获取数据（支持分页与条件过滤）
     async function fetchJobs() {
       try {
-        const resp = await fetch("/api/jobs");
+        const params = new URLSearchParams();
+        params.set("page", currentFilter.page);
+        params.set("limit", currentFilter.limit);
+        if (currentFilter.state) params.set("state", currentFilter.state);
+        if (currentFilter.search) params.set("search", currentFilter.search);
+
+        const resp = await fetch(`/api/jobs?${params.toString()}`);
         const json = await resp.json();
         
-        // 关键向后兼容解构：适配 { data: [...], pagination: {...} } 或裸数组 [...]
-        const jobsList = Array.isArray(json) 
-          ? json 
-          : (json && Array.isArray(json.data) ? json.data : []);
+        let jobsList = [];
+        if (Array.isArray(json)) {
+          jobsList = json;
+          updatePaginationUI({
+            total: json.length,
+            page: 1,
+            limit: json.length,
+            totalPages: 1,
+            hasMore: false,
+          });
+        } else if (json && Array.isArray(json.data)) {
+          jobsList = json.data;
+          updatePaginationUI(json.pagination);
+        }
 
         jobsById.clear();
         for (const job of jobsList) {
@@ -1533,6 +1755,8 @@
             if (patch.result) existingJob.result = patch.result;
             if (patch.logTail) existingJob.logTail = patch.logTail;
             if (patch.completedAt) existingJob.completedAt = patch.completedAt;
+            if (patch.sessionMode) existingJob.sessionMode = patch.sessionMode;
+            if (patch.numTurns !== undefined) existingJob.numTurns = patch.numTurns;
           } else if (patch.jobId) {
             jobsById.set(patch.jobId, patch);
           }
@@ -1780,14 +2004,22 @@
       const btnReject = document.getElementById("btnReject");
       const btnEnter = document.getElementById("btnEnter");
       const btnSend = document.getElementById("btnSendIntervention");
+      const channelTag = document.getElementById("hitlChannelTag");
       if (!badge || !text || !input) return;
+
+      const isStream = job?.sessionMode === "stream";
+      if (channelTag) {
+        channelTag.innerText = isStream ? "Interactive Stream Channel (v1.5+ GA)" : "One-shot Command Mode";
+      }
 
       const isRunning = job && job.state === "running";
       if (isRunning) {
         badge.className = "hitl-channel-badge hitl-channel-ready";
-        text.innerText = "输入通道就绪 (RUNNING)";
+        text.innerText = isStream ? "流式会话就绪 (STREAM ACTIVE)" : "输入通道就绪 (RUNNING)";
         input.disabled = false;
-        input.placeholder = "在此输入向 Agent 进程注入的指导指令、参数调整或确认文本 (按 Ctrl+Enter 立即发送)...";
+        input.placeholder = isStream
+          ? "在此输入下一轮对话指令或调整参数 (按 Ctrl+Enter 立即发送)..."
+          : "在此输入向 Agent 进程注入的指导指令、参数调整或确认文本 (按 Ctrl+Enter 立即发送)...";
         if (btnApprove) btnApprove.disabled = false;
         if (btnReject) btnReject.disabled = false;
         if (btnEnter) btnEnter.disabled = false;

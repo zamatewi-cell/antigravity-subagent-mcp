@@ -78,6 +78,8 @@ export function persistJob(job) {
       startedAt: job.startedAt,
       completedAt: job.completedAt,
       conversationId: job.conversationId || null,
+      sessionMode: job.sessionMode || job.invocation?.session_mode || "print",
+      numTurns: job.numTurns ?? job.result?.num_turns ?? 0,
       invocation: job.invocation,
       result: job.result,
       attempts: job.attempts || 1,
@@ -111,6 +113,9 @@ export function restorePersistedJobs() {
         const text = fs.readFileSync(fullPath, "utf8");
         const data = JSON.parse(text);
         if (!data.jobId) continue;
+
+        data.sessionMode = data.sessionMode || data.invocation?.session_mode || "print";
+        data.numTurns = data.numTurns ?? data.result?.num_turns ?? 0;
 
         if (["running", "stopping", "retrying", "queued"].includes(data.state)) {
           data.state = "interrupted";
