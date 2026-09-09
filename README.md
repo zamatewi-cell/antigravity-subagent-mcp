@@ -85,7 +85,7 @@ npm ci
 # 3. 运行全量离线自动化测试套件 (11 门单测聚合)
 npm run test:offline
 ```
-> 若看到 11 套测试全部绿色通过（`All Tests Passed`），说明运行环境与 MCP 本地组件 100% 正常。
+> 若看到 11 套测试全部绿色通过（`All Tests Passed`），说明 Node.js 依赖、MCP 本地组件及离线回归测试正常（AGY CLI 凭据与模型连通性由后续步骤验证）。
 
 ---
 
@@ -129,18 +129,22 @@ ANTIGRAVITY_DEFAULT_MODEL = "gemini-3.8-flash-high"
 > **提示词示范**：  
 > “检查 antigravity-subagent MCP 是否可用，调用 `antigravity_status`，告诉我当前 AGY CLI 版本、默认模型以及运行状态。”
 
-如果配置正常，Codex 会调用 `antigravity_status` 并返回就绪报告：
+如果配置正常，Codex 会调用 `antigravity_status` 并返回真实的就绪结构：
 ```json
 {
   "status": "READY",
-  "cli": {
-    "version": "1.x.x",
-    "path": "C:\\Users\\...\\AppData\\Local\\agy\\bin\\agy.exe",
-    "ready": true
-  },
+  "cli_path": "C:\\Users\\...\\AppData\\Local\\agy\\bin\\agy.exe",
+  "cli_version": "1.x.x",
   "default_model": "gemini-3.8-flash-high",
-  "permission_mode": "auto-approve",
-  "dashboard": { "running": false, "url": "http://localhost:3721" }
+  "default_model_available": true,
+  "default_permission_mode": "auto-approve",
+  "models": [
+    "gemini-3.8-flash-high",
+    "gemini-3.8-pro",
+    "..."
+  ],
+  "agents": ["..."],
+  "errors": []
 }
 ```
 
