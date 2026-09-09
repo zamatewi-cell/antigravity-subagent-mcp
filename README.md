@@ -23,6 +23,16 @@ The bridge never invokes `--disable-slash-commands`. It uses AGY's required
 Per-job AGY logs are stored under `logs/` so a bridge response can be matched to
 the original backend error without scanning unrelated global CLI logs.
 
+Version 1.5.0 changes:
+
+- **Interactive Stream Transport & Native Multi-Turn HITL Closure**:
+  - **Dual-Track Execution Architecture**: Retains the rock-solid one-off delegation track (`--output-format json --print=<prompt>`) for batch automation, while introducing the official Headless Streaming channel (`--input-format stream-json --output-format stream-json --dangerously-skip-permissions`) activated via `session_mode: "stream"`.
+  - **NDJSON Stream Protocol Parser & Framing**: Implemented `StreamLineParser` in `src/stream-transport.mjs` to reliably handle chunk fragmentation, line-boundary recovery, and TCP socket packet coalescing. Standardized input packaging via `encodeStreamUserMessage` adhering strictly to official Headless NDJSON event schema (`{"event": "user", "message": {"content": "..."}}`).
+  - **Live Handshake & Conversation Tracking**: Intercepts `event: init` to immediately extract the genuine backend `conversation_id` (`job.conversationId`), continuously digests `step_update` to stream text deltas, and handles `result` to increment multi-turn counters (`numTurns`).
+  - **Persistent Session HITL Pipeline**: Upgraded `sendInputToJob` and Dashboard `POST /api/jobs/:id/interact` to directly inject structured NDJSON into running child processes, enabling persistent multi-turn conversations in the same child process without restarting CLI or creating disjoint sessions.
+  - **New MCP Tool `interact_gemini_task`**: Directly exposed to MCP clients for orchestrating interactive conversations with long-running subagents.
+  - **Real AGY End-to-End Test Suite**: Validated full physical round-trip on actual local hardware with `D:\Antigravity\agy\bin\agy.exe` (`test/hitl-real-agy.e2e.test.mjs`), confirming prompt -> response -> Web interaction injection -> turn 2 response -> graceful exit (`Exit Code: 0`).
+
 Version 1.4.0 changes:
 
 - **Historical Jobs Pagination & Multidimensional Filtering (R1)**:
@@ -127,10 +137,12 @@ Version 1.0.3 reliability changes:
   resolve project inputs instead of substituting the default scratch workspace.
   This supplies workspace context, not a filesystem sandbox.
 
-Offline validation (aggregates all 10 unit and integration test suites):
+Offline validation (aggregates all 11 unit and integration test suites):
 `npm run test:offline`
 
 Individual test suites:
+- Interactive Stream Transport & NDJSON Framing (1.5.0): `node test/hitl-stream-transport.test.mjs`
+- Real AGY End-to-End Multi-Turn E2E (1.5.0): `node test/hitl-real-agy.e2e.test.mjs`
 - R1 Historical Jobs Pagination & Filtering: `node test/pagination.test.mjs`
 - R2 Fine-Grained SSE Delta Events: `node test/sse-delta.test.mjs`
 - R3 Native SVG Agent DAG Topology: `node test/dag-topology.test.mjs`

@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 import { sanitizeDiagnostics } from "./diagnostics.mjs";
 import { persistJob } from "./storage.mjs";
+import { encodeStreamUserMessage } from "./stream-transport.mjs";
 
 // Only target the PID returned by our own spawn. Never kill by executable name.
 export async function stopProcessTree(child) {
@@ -171,8 +172,9 @@ export async function sendInputToJob(job, input) {
     job.child.stdin.__epipeProtected = true;
   }
 
+  const isStream = job.sessionMode === "stream";
   const raw = String(input ?? "");
-  const formatted = raw.endsWith("\n") ? raw : `${raw}\n`;
+  const formatted = isStream ? encodeStreamUserMessage(raw) : (raw.endsWith("\n") ? raw : `${raw}\n`);
   const bytesWritten = Buffer.byteLength(formatted, "utf8");
 
   return new Promise((resolve, reject) => {
@@ -198,11 +200,15 @@ export async function sendInputToJob(job, input) {
           error.code = err.code || "WRITE_FAILED";
           reject(error);
         } else {
+          if (isStream && job.progress) {
+            job.progress.phase = "EXECUTING";
+          }
           resolve({
             success: true,
             jobId: job.jobId,
             bytesWritten,
             flushed,
+            sessionMode: isStream ? "stream" : "print",
           });
         }
       });

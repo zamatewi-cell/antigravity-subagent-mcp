@@ -1,6 +1,6 @@
 {
   "name": "codex-antigravity-subagent-mcp",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "private": true,
   "type": "module",
   "description": "Local MCP bridge that lets Codex delegate work to Google Antigravity CLI.",
@@ -34,7 +34,9 @@
     "test:sse-delta": "node test/sse-delta.test.mjs",
     "test:dag-topology": "node test/dag-topology.test.mjs",
     "test:hitl": "node test/hitl.test.mjs",
-    "test:offline": "node test/counterexamples.test.mjs && node test/dashboard.test.mjs && node test/cancel-consistency.test.mjs && node test/lifecycle.test.mjs && node test/progress.test.mjs && node test/diagnostics.test.mjs && node test/pagination.test.mjs && node test/sse-delta.test.mjs && node test/dag-topology.test.mjs && node test/hitl.test.mjs",
+    "test:stream": "node test/hitl-stream-transport.test.mjs",
+    "test:stream-e2e": "node test/hitl-real-agy.e2e.test.mjs",
+    "test:offline": "node test/counterexamples.test.mjs && node test/dashboard.test.mjs && node test/cancel-consistency.test.mjs && node test/lifecycle.test.mjs && node test/progress.test.mjs && node test/diagnostics.test.mjs && node test/pagination.test.mjs && node test/sse-delta.test.mjs && node test/dag-topology.test.mjs && node test/hitl.test.mjs && node test/hitl-stream-transport.test.mjs",
     "test:all": "node test/smoke.mjs && npm run test:offline",
     "test:live": "node test/live-validation.mjs"
   },

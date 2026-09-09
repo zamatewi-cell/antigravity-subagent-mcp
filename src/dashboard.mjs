@@ -14,7 +14,7 @@ const WEB_ROOT = path.resolve(__dirname, "web");
 const HTML_FILE = path.join(WEB_ROOT, "index.html");
 
 const DEFAULT_PORT = Number(process.env.ANTIGRAVITY_DASHBOARD_PORT) || 3721;
-const DASHBOARD_VERSION = "1.4.0";
+const DASHBOARD_VERSION = "1.5.0";
 
 // 物理日志读取尾部内存缓存：logFile -> { mtimeMs, size, tail }，避免每秒重复打开同步读取
 const logTailCache = new Map();
@@ -84,6 +84,8 @@ export function formatJobDetail(job) {
       log_file: job.invocation?.log_file || null,
     },
     attempts: job.attempts || 1,
+    sessionMode: job.sessionMode || job.invocation?.session_mode || "print",
+    numTurns: job.numTurns || 0,
     result: job.result || null,
     progress: {
       phase: progress?.phase || "UNKNOWN",
@@ -509,7 +511,9 @@ export function startDashboardServer(options = {}) {
               jobId,
               bytesWritten: sendResult.bytesWritten,
               flushed: sendResult.flushed,
-              experimental: true,
+              sessionMode: sendResult.sessionMode,
+              numTurns: job.numTurns || 0,
+              experimental: job.sessionMode === "stream" ? false : true,
             }));
           } catch (err) {
             res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });

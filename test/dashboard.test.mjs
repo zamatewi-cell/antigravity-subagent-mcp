@@ -102,7 +102,7 @@ try {
   assert.equal(statusResp.statusCode, 200);
   const statusData = JSON.parse(statusResp.body);
   assert.equal(statusData.status, "OK");
-  assert.equal(statusData.version, "1.4.0");
+  assert.equal(statusData.version, "1.5.0");
   assert.equal(statusData.total_jobs, 2);
   assert.equal(statusData.active_jobs, 2);
   console.log("  -> PASS: 状态接口统计准确无误");

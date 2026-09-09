@@ -7,13 +7,14 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import * as z from "zod/v4";
 import { enrichAgyResult, sanitizeDiagnostics } from "./diagnostics.mjs";
-import { stopProcessTree, stopJob, cancelJob, isRetryablePreflightFailure } from "./process-control.mjs";
+import { stopProcessTree, stopJob, cancelJob, sendInputToJob, isRetryablePreflightFailure } from "./process-control.mjs";
+import { StreamLineParser, encodeStreamUserMessage } from "./stream-transport.mjs";
 import { getTaskProgress } from "./progress.mjs";
 import { persistJob, restorePersistedJobs } from "./storage.mjs";
 import { startDashboardServer, openInBrowser } from "./dashboard.mjs";
 import { withDirectoryLock } from "./directory-lock.mjs";
 
-const SERVER_VERSION = "1.4.0";
+const SERVER_VERSION = "1.5.0";
 const DEFAULT_MODEL = process.env.ANTIGRAVITY_DEFAULT_MODEL || "gemini-3.8-flash-high";
 const DEFAULT_PERMISSION_MODE = process.env.ANTIGRAVITY_PERMISSION_MODE || "auto-approve";
 const DEFAULT_TIMEOUT_SECONDS = 300;
@@ -69,6 +70,9 @@ const invocationSchema = z.object({
   timeout_seconds: z.number().int().min(30).max(MAX_TIMEOUT_SECONDS).default(DEFAULT_TIMEOUT_SECONDS).describe(
     "单次 AGY 运行超时，30 到 21600 秒。Teamwork 长任务应提高该值或使用后台任务工具。",
   ),
+  session_mode: z.enum(["print", "stream"]).default("print").describe(
+    "AGY 运行轨道模式：print 为常规单次委托执行（自动化/批量），stream 为交互式流传输长会话（支持多轮人机交互）。",
+  ),
 });
 
 function ensureDirectory(value, label) {
@@ -98,12 +102,17 @@ function buildInvocation(input, jobId) {
     "working_directory",
   );
   const logFile = path.join(DIAGNOSTIC_LOG_DIR, `agy-${jobId}-${randomUUID()}.log`);
+  const sessionMode = input.session_mode || "print";
   const args = [
     "--model", input.model || DEFAULT_MODEL,
-    "--output-format", "json",
     "--log-file", logFile,
     "--add-dir", cwd,
   ];
+  if (sessionMode === "stream") {
+    args.push("--input-format", "stream-json", "--output-format", "stream-json");
+  } else {
+    args.push("--output-format", "json");
+  }
 
   if (input.mode) args.push("--mode", input.mode);
   if (input.effort) args.push("--effort", input.effort);
@@ -119,11 +128,13 @@ function buildInvocation(input, jobId) {
   if (input.permission_mode === "auto-approve") args.push("--dangerously-skip-permissions");
 
   const timeoutSeconds = input.timeout_seconds;
-  args.push("--print-timeout", `${timeoutSeconds}s`);
-  // AGY 的 --print 会吞掉后续参数，因此必须放在最后并使用 --print=<prompt> 形式。
-  // 不传 --disable-slash-commands，确保 /teamwork-preview 等系统命令会被完整展开。
-  const workspaceContext = `\n\n[Codex delegation context]\nTask working directory (absolute): ${JSON.stringify(cwd)}\nResolve all task-relative paths against this directory. Pass the absolute directory to every subagent and terminal tool. Do not substitute the AGY scratch directory or manufacture missing input data. If an input cannot be read, report the failure. Follow the user's requested file-access and edit scope.\n[/Codex delegation context]`;
-  args.push(`--print=${input.prompt}${workspaceContext}`);
+  if (sessionMode === "print") {
+    args.push("--print-timeout", `${timeoutSeconds}s`);
+    // AGY 的 --print 会吞掉后续参数，因此必须放在最后并使用 --print=<prompt> 形式。
+    // 不传 --disable-slash-commands，确保 /teamwork-preview 等系统命令会被完整展开。
+    const workspaceContext = `\n\n[Codex delegation context]\nTask working directory (absolute): ${JSON.stringify(cwd)}\nResolve all task-relative paths against this directory. Pass the absolute directory to every subagent and terminal tool. Do not substitute the AGY scratch directory or manufacture missing input data. If an input cannot be read, report the failure. Follow the user's requested file-access and edit scope.\n[/Codex delegation context]`;
+    args.push(`--print=${input.prompt}${workspaceContext}`);
+  }
 
   return {
     command: AGY_CLI,
@@ -132,6 +143,7 @@ function buildInvocation(input, jobId) {
     model: input.model || DEFAULT_MODEL,
     timeoutSeconds,
     logFile,
+    sessionMode,
   };
 }
 
@@ -155,12 +167,16 @@ function parseAgyJson(stdout) {
 
 function launchAgy(input, jobId = randomUUID()) {
   const invocation = buildInvocation(input, jobId);
+  const isStream = invocation.sessionMode === "stream";
   const startedAt = new Date();
   const job = {
     jobId,
     state: "running",
     startedAt: startedAt.toISOString(),
     completedAt: null,
+    sessionMode: invocation.sessionMode,
+    numTurns: 0,
+    conversationId: input.conversation_id || null,
     invocation: {
       prompt: input.prompt,
       model: invocation.model,
@@ -168,6 +184,7 @@ function launchAgy(input, jobId = randomUUID()) {
       timeout_seconds: invocation.timeoutSeconds,
       slash_command: input.prompt.startsWith("/") ? input.prompt.split(/\s+/, 1)[0] : null,
       log_file: invocation.logFile,
+      session_mode: invocation.sessionMode,
     },
     stdout: "",
     stderr: "",
@@ -179,7 +196,44 @@ function launchAgy(input, jobId = randomUUID()) {
     stopReason: null,
     stopPromise: null,
     terminationError: null,
+    streamingText: "",
+    onTurnComplete: null,
   };
+
+  let streamParser = null;
+  if (isStream) {
+    streamParser = new StreamLineParser((evt) => {
+      if (!evt || typeof evt !== "object") return;
+      if (evt.event === "init" && evt.conversation_id) {
+        job.conversationId = evt.conversation_id;
+        if (!job.progress) job.progress = {};
+        job.progress.conversation_id = evt.conversation_id;
+        persistJob(job);
+      } else if (evt.event === "step_update" && evt.step_update) {
+        const su = evt.step_update;
+        if (!job.progress) job.progress = {};
+        if (su.step_index !== undefined) job.progress.current_step = su.step_index;
+        job.progress.phase = su.state === "DONE" ? "WAITING_INPUT" : "EXECUTING";
+        if (su.step_type) job.progress.current_action = `[${su.step_type}] ${su.state || ""}`;
+        if (su.step_type === "agent_response" && su.text_delta) {
+          job.streamingText = (job.streamingText || "") + su.text_delta;
+        }
+      } else if (evt.event === "result" && evt.result) {
+        const res = evt.result;
+        job.numTurns = res.num_turns || (job.numTurns || 0) + 1;
+        job.lastTurnResult = res;
+        job.result = res;
+        if (res.conversation_id) job.conversationId = res.conversation_id;
+        if (!job.progress) job.progress = {};
+        job.progress.phase = "IDLE_AWAITING_INPUT";
+        job.progress.current_action = `Turn ${job.numTurns} completed`;
+        persistJob(job);
+        if (typeof job.onTurnComplete === "function") {
+          job.onTurnComplete(res);
+        }
+      }
+    });
+  }
 
   const child = spawn(invocation.command, invocation.args, {
     cwd: invocation.cwd,
@@ -201,8 +255,19 @@ function launchAgy(input, jobId = randomUUID()) {
       void stopJob(job, "output_limit");
     }
   };
-  child.stdout.on("data", (chunk) => append("stdout", chunk));
+  child.stdout.on("data", (chunk) => {
+    append("stdout", chunk);
+    if (streamParser) streamParser.feed(chunk);
+  });
   child.stderr.on("data", (chunk) => append("stderr", chunk));
+
+  // 流式交互模式下，通过 stdin 发送首发 prompt
+  if (isStream) {
+    const workspaceContext = `\n\n[Codex delegation context]\nTask working directory (absolute): ${JSON.stringify(invocation.cwd)}\nResolve all task-relative paths against this directory. Pass the absolute directory to every subagent and terminal tool. Do not substitute the AGY scratch directory or manufacture missing input data. If an input cannot be read, report the failure. Follow the user's requested file-access and edit scope.\n[/Codex delegation context]`;
+    const initialPrompt = `${input.prompt}${workspaceContext}`;
+    const initialMsg = encodeStreamUserMessage(initialPrompt);
+    child.stdin.write(initialMsg);
+  }
 
   job.completion = new Promise((resolve) => {
     child.once("error", (error) => {
@@ -224,7 +289,11 @@ function launchAgy(input, jobId = randomUUID()) {
       if (job.completedAt) return;
       if (job.timeoutHandle) clearTimeout(job.timeoutHandle);
       if (job.stopPromise) await job.stopPromise;
-      const parsed = parseAgyJson(job.stdout);
+      if (streamParser) streamParser.flush();
+      let parsed = parseAgyJson(job.stdout);
+      if (!parsed && isStream && job.result) {
+        parsed = job.result;
+      }
       let diagnosticLog = "";
       try {
         diagnosticLog = fs.readFileSync(job.invocation.log_file, "utf8");
@@ -280,6 +349,9 @@ function publicJob(job, includeResult = true) {
     model: job.invocation?.model,
     working_directory: job.invocation?.cwd,
     slash_command: job.invocation?.slash_command,
+    session_mode: job.sessionMode || "print",
+    num_turns: job.numTurns || 0,
+    conversation_id: job.conversationId || job.progress?.conversation_id || null,
     attempts: job.attempts,
     progress: getTaskProgress(job),
   };
@@ -307,6 +379,12 @@ async function runWithPreflightRetry(input, signal, ctx) {
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       if (signal?.aborted) throw new Error("MCP 调用已取消，未启动新任务。");
       const job = launchAgy(input);
+      if (job.sessionMode === "stream") {
+        // 单次同步等待调用，在首轮得到结果后自动关闭 stdin 促使进程正常收敛退出
+        job.onTurnComplete = () => {
+          try { job.child?.stdin?.end(); } catch {}
+        };
+      }
       const abort = () => { void stopJob(job, "cancelled"); };
       signal?.addEventListener("abort", abort, { once: true });
 
@@ -520,6 +598,38 @@ server.registerTool(
     if (!job) return toolResponse({ status: "ERROR", error: `未找到任务：${job_id}` }, true);
     await cancelJob(job);
     return toolResponse(publicJob(job), job.state === "error");
+  },
+);
+
+server.registerTool(
+  "interact_gemini_task",
+  {
+    title: "与运行中的 Gemini 子代理交互 (HITL)",
+    description: "向正在运行的长会话子代理（尤其处于 stream 模式的任务）注入交互式指令或人工输入。",
+    inputSchema: z.object({
+      job_id: z.string().uuid().describe("目标运行中任务的 job_id"),
+      input: z.string().min(1).describe("需要向子代理输入的指令或交互内容"),
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+  },
+  async ({ job_id, input }) => {
+    const job = jobs.get(job_id);
+    if (!job) return toolResponse({ status: "ERROR", error: `未找到任务：${job_id}` }, true);
+    if (job.state !== "running") {
+      return toolResponse({ status: "ERROR", error: `任务当前状态为 ${job.state}，无法接收交互输入` }, true);
+    }
+    try {
+      const sendResult = await sendInputToJob(job, input);
+      return toolResponse({
+        status: "SUCCESS",
+        job_id: job.jobId,
+        bytes_written: sendResult.bytesWritten,
+        session_mode: sendResult.sessionMode,
+        num_turns: job.numTurns || 0,
+      });
+    } catch (err) {
+      return toolResponse({ status: "ERROR", error: err.message }, true);
+    }
   },
 );
 

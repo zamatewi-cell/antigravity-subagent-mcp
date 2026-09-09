@@ -1,7 +1,7 @@
-# 1.4.0 验证记录与工程硬化交付报告
+# 1.5.0 验证记录与工程交付报告
 
-验证日期：2026-09-08  
-服务版本：`v1.4.0`  
+验证日期：2026-09-09  
+服务版本：`v1.5.0`  
 默认模型：`gemini-3.8-flash-high`
 
 ---
@@ -22,6 +22,7 @@
 | **v1.3.2** | **状态机与安全终极闭环**：独立看板全状态只读拦截（HTTP 409）；子代理状态机优先级纠偏（killed 绝不漂移，删除二次洗绿）；Host 头与非本地 Origin POST 403 阻断；数据目录统一；真实生产目录锁导出验证。 | `test/cancel-consistency.test.mjs` (Test 4.1), `test/counterexamples.test.mjs` (Test 7, 14), `test/dashboard.test.mjs` (Test 3.2) |
 | **v1.3.3** | **1.3.x 终极封板与架构解耦**：<br>1. 两层解析架构彻底根治子代理状态冻结；<br>2. 抽离独立目录锁模块 `src/directory-lock.mjs`；<br>3. 实现真 LRU 机制与 `diskJobsCache` 500 条上限保护；<br>4. 配置 GitHub Actions CI 自动化流水线 (`.github/workflows/ci.yml`)。 | `test/counterexamples.test.mjs` (Test 16~18), `npm run test:offline` (全部 6 套离线套件 100% 通过) |
 | **v1.4.0** | **企业级四大核心特性飞跃**：<br>1. **历史任务分页与过滤 (R1)**：`GET /api/jobs` 支持 `page` / `limit` / `state` / `search`，标准化分页响应与无参向后兼容；<br>2. **SSE 差异增量流与 Delta Patching (R2)**：首发 snapshot + 变动事件 (`job_created`/`job_updated`/`job_removed`) + `:keep-alive` 保活，前端内存字典局部打补丁消除全量重刷；<br>3. **原生 SVG Agent DAG 拓扑 (R3)**：有向拓扑元数据注入 (`parentId`/`depth`/`childrenIds`/`nodeType`)，纯原生 SVG 贝塞尔连线与 CSS 呼吸流光；<br>4. **Human-in-the-loop 软介入 (R4)**：子进程 `stdio` 保留，安全 `sendInputToJob` 与 `POST /api/jobs/:id/interact` 接口及前端控制台。 | `test/pagination.test.mjs` (12/12 PASS), `test/sse-delta.test.mjs` (6/6 PASS), `test/dag-topology.test.mjs` (4/4 PASS), `test/hitl.test.mjs` (7/7 PASS), `npm run test:offline` (全部 10 套离线套件 100% 通过) |
+| **v1.5.0** | **原生双向交互流传输管道与真实 AGY E2E 闭环 (HITL GA)**：<br>1. **双轨执行架构 (Dual-Track)**：常规单次任务保持 `--print` 稳定委托，交互任务启用 `--input-format stream-json --output-format stream-json`；<br>2. **官方 NDJSON 协议规范接入**：stdout 捕获 `event: init` 提取真实 `conversation_id`，行缓冲流式解析 `step_update` 与 `result`；<br>3. **同进程同会话多轮驱动**：首轮完成后进程保持存活，通过 stdin/Dashboard `/interact` 注入第二轮并递增 `numTurns`；<br>4. **真实 AGY 端到端闭环**：本地真实 `agy.exe` 跑通“第 1 轮 prompt → Web 交互介入 → 同会话第 2 轮完成 → 优雅退出 (Exit 0)”。 | `test/hitl-stream-transport.test.mjs` (5/5 PASS), `test/hitl-real-agy.e2e.test.mjs` (真实 AGY E2E 闭环 PASS), `npm run test:offline` (全部 11 套离线套件 100% 通过) |
 
 ---
 
@@ -130,8 +131,8 @@
 ### 验收标准 3：系统集成、测试沙箱隔离保障与全量回归 (AC3)
 - **断言事实**:
   1. **沙箱隔离断言**: 所有单测均采用动态 `await import` 与临时目录（`fs.mkdtempSync`）创建隔离沙箱，强约束断言 `assert(JOBS_DIR.startsWith(tempDir))`，100% 成立。
-  2. **生产目录零污染**: 运行全部 10 套单测前后，生产环境目录 `./data/jobs` 文件数精确保持 105 个（`Count: 105`），零新增、零修改、零污染。
-  3. **全量离线回归套件**: 运行 `npm run test:offline`，完整串联的 10 套单测（counterexamples, dashboard, cancel-consistency, lifecycle, progress, diagnostics, pagination, sse-delta, dag-topology, hitl）**全部 100% 绿色通过**（退出码 0）。
+  2. **生产目录零污染**: 运行全部 11 套单测前后，生产环境目录 `./data/jobs` 文件数精确保持 105 个（`Count: 105`），零新增、零修改、零污染。
+  3. **全量离线回归套件**: 运行 `npm run test:offline`，完整串联的 11 套单测（counterexamples, dashboard, cancel-consistency, lifecycle, progress, diagnostics, pagination, sse-delta, dag-topology, hitl, hitl-stream-transport）**全部 100% 绿色通过**（退出码 0）。
 
 ---
 
@@ -142,6 +143,7 @@
 | **标准 MCP 协议任务启动** | SUCCESS | 调用 `start_gemini_task` 生成全局 Job ID，后台拉起独立无头 `agy.exe` 进程。 |
 | **Teamwork 级联多代理启动** | SUCCESS | 成功拉起 Project Sentinel、Top Orchestrator 与专项 Worker，并在 transcript 中核对到 `invoke_subagent`。 |
 | **Web 看板微观上帝视角呈现** | SUCCESS | 使用 Playwright 自动化渲染 `http://localhost:3721`，主编排器卡片、子代理卡片矩阵与 Step 1~72+ 全量活动流水毫秒级实时联动。 |
+| **真实 AGY 交互流传输 E2E 闭环 (v1.5.0)** | SUCCESS | 本地 `test/hitl-real-agy.e2e.test.mjs` 拉起真实 `D:\Antigravity\agy\bin\agy.exe`，跑通“第 1 轮 Prompt → 捕获 init conversation_id (`5a87738a-...`) → Web Dashboard `/interact` 注入第 2 轮 → 同会话输出第 2 轮结果 → `stdin.end()` 优雅退出 (Exit 0)”。 |
 
 ---
 
