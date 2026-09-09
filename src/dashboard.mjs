@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { exec } from "node:child_process";
 import { restorePersistedJobs, persistJob, loadPersistedJobsRaw, JOBS_DIR } from "./storage.mjs";
 import { getTaskProgress } from "./progress.mjs";
-import { cancelJob, sendInputToJob } from "./process-control.mjs";
+import { cancelJob, sendInputToJob, finishJob } from "./process-control.mjs";
 import { sanitizeDiagnostics } from "./diagnostics.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -14,7 +14,7 @@ const WEB_ROOT = path.resolve(__dirname, "web");
 const HTML_FILE = path.join(WEB_ROOT, "index.html");
 
 const DEFAULT_PORT = Number(process.env.ANTIGRAVITY_DASHBOARD_PORT) || 3721;
-const DASHBOARD_VERSION = "1.5.0";
+const DASHBOARD_VERSION = "1.5.1";
 
 // 物理日志读取尾部内存缓存：logFile -> { mtimeMs, size, tail }，避免每秒重复打开同步读取
 const logTailCache = new Map();
@@ -524,6 +524,41 @@ export function startDashboardServer(options = {}) {
           res.end(JSON.stringify({ error: e.message }));
         }
       });
+      return;
+    }
+
+    // 5.2 优雅结束长会话 API (Finish Session)
+    const finishMatch = pathname.match(/^\/api\/jobs\/([^/]+)\/finish$/);
+    if (finishMatch && req.method === "POST") {
+      const jobId = finishMatch[1];
+      const job = getJobById(jobId);
+
+      if (!job || !memoryJobs) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "Job is not running or stdin is closed" }));
+        return;
+      }
+
+      if (job.state !== "running") {
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ status: "SUCCESS", message: `任务 ${jobId} 已处于终态`, job: formatJobDetail(job) }));
+        return;
+      }
+
+      if (job.sessionMode !== "stream") {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: `任务 ${jobId} 为 ${job.sessionMode || "print"} 模式，仅 stream 会话任务支持 finish` }));
+        return;
+      }
+
+      try {
+        await finishJob(job);
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ status: "SUCCESS", message: `任务 ${jobId} 已优雅结束并收敛为终态`, job: formatJobDetail(job) }));
+      } catch (err) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: err.message }));
+      }
       return;
     }
 

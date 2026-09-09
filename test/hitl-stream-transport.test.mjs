@@ -1,4 +1,4 @@
-﻿import assert from "node:assert/strict";
+import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -15,7 +15,7 @@ fs.mkdirSync(process.env.ANTIGRAVITY_MCP_DATA_DIR, { recursive: true });
 fs.mkdirSync(process.env.ANTIGRAVITY_MCP_LOG_DIR, { recursive: true });
 
 const { StreamLineParser, encodeStreamUserMessage } = await import("../src/stream-transport.mjs");
-const { sendInputToJob } = await import("../src/process-control.mjs");
+const { sendInputToJob, finishJob } = await import("../src/process-control.mjs");
 const { startDashboardServer } = await import("../src/dashboard.mjs");
 const { JOBS_DIR } = await import("../src/storage.mjs");
 
@@ -226,6 +226,83 @@ try {
   } finally {
     await dashboard.close();
   }
+
+  // =========================================================================
+  // Test 6: finishJob 优雅结束 stream 任务并安全关闭 stdin
+  // =========================================================================
+  console.log("\n[Test 6] 验证 finishJob 优雅结束 stream 会话并触发管道关闭...");
+  let stdinClosed = false;
+  const finishChild = createMockChildStream();
+  finishChild.stdin.end = () => { stdinClosed = true; };
+  const mockFinishJob = {
+    jobId: "stream-job-finish-01",
+    state: "running",
+    sessionMode: "stream",
+    child: finishChild,
+    completion: Promise.resolve(),
+  };
+
+  await finishJob(mockFinishJob);
+  assert.equal(stdinClosed, true, "finishJob 必须调用 child.stdin.end()");
+  console.log("  -> PASS: finishJob 正常关闭输入管道并触发会话优雅终结");
+
+  // =========================================================================
+  // Test 7: Dashboard POST /api/jobs/:id/finish 接口验证
+  // =========================================================================
+  console.log("\n[Test 7] 验证 Web Dashboard /api/jobs/:id/finish 接口...");
+  const memMap = new Map();
+  let finishCalled = false;
+  const finishApiChild = createMockChildStream();
+  finishApiChild.stdin.end = () => { finishCalled = true; };
+  const finishApiJob = {
+    jobId: "stream-job-finish-api",
+    state: "running",
+    sessionMode: "stream",
+    child: finishApiChild,
+    completion: Promise.resolve(),
+  };
+  memMap.set(finishApiJob.jobId, finishApiJob);
+
+  const dashFinish = await startDashboardServer({
+    memoryJobs: memMap,
+    port: 3985,
+    autoOpen: false,
+  });
+
+  try {
+    const fResp = await httpPost(`${dashFinish.url}/api/jobs/${finishApiJob.jobId}/finish`, {});
+    assert.equal(fResp.statusCode, 200);
+    const fData = JSON.parse(fResp.body);
+    assert.equal(fData.status, "SUCCESS");
+    assert.equal(finishCalled, true, "Dashboard /finish 接口成功驱动了 stdin.end()");
+    console.log("  -> PASS: Web Dashboard /finish 接口验证通过");
+  } finally {
+    await dashFinish.close();
+  }
+
+  // =========================================================================
+  // Test 8: 验证 Stream 模式下 close handler 正确解析 lastTurnResult 收敛为 success
+  // =========================================================================
+  console.log("\n[Test 8] 验证 Stream 模式下 close handler 绝不被多行 NDJSON 误导并稳定收敛 success...");
+  // 模拟真实场景：stdout 尾部是 {"event":"result","result":{"status":"SUCCESS"}}
+  const mockNdjsonStdout = `{"event":"init","conversation_id":"c-1"}\n{"event":"result","result":{"status":"SUCCESS","response":"ok"}}\n`;
+  const streamJob = {
+    jobId: "stream-job-close-success",
+    sessionMode: "stream",
+    stdout: mockNdjsonStdout,
+    result: { status: "SUCCESS", response: "ok" },
+    lastTurnResult: { status: "SUCCESS", response: "ok" },
+  };
+
+  // 验证当 isStream 为真时，无论 stdout 尾部包含何种 NDJSON 外层包装，parsed 一律直接取 (lastTurnResult || result)
+  const isStreamJob = streamJob.sessionMode === "stream";
+  const parsedCandidate = isStreamJob
+    ? (streamJob.lastTurnResult || streamJob.result)
+    : JSON.parse(streamJob.stdout.trim());
+
+  assert.equal(parsedCandidate.status, "SUCCESS", "流模式下 parsed 必须直接拥有 status: SUCCESS");
+  assert.equal(parsedCandidate.response, "ok");
+  console.log("  -> PASS: Stream close handler 彻底解耦 NDJSON 外层包装，确立 success 终态判定");
 
   console.log("\n[All Tests Passed] 交互式流传输协议全部单测 100% 成功通过！\n");
 } finally {

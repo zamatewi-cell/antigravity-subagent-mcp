@@ -224,3 +224,39 @@ export async function sendInputToJob(job, input) {
   });
 }
 
+/**
+ * 优雅结束 stream 交互长任务并等待其关闭收敛为 success 终态
+ * @param {object} job - 任务对象
+ * @param {number} [timeoutMs=15000] - 最长等待时间
+ * @returns {Promise<object>}
+ */
+export async function finishJob(job, timeoutMs = 15000) {
+  if (!job) return null;
+  if (job.state !== "running") {
+    return job;
+  }
+  if (job.sessionMode !== "stream") {
+    const error = new Error("只有处于 running 态的 stream 会话任务支持通过 finishJob 优雅收官");
+    error.code = "NOT_STREAM_JOB";
+    throw error;
+  }
+
+  // 关闭子进程 stdin 输入流，触发 AGY CLI 正常优雅退出
+  if (job.child?.stdin && !job.child.stdin.destroyed) {
+    try {
+      job.child.stdin.end();
+    } catch {}
+  }
+
+  // 等待进程退出及 close handler 状态收敛
+  if (job.completion) {
+    await Promise.race([
+      job.completion,
+      new Promise((resolve) => setTimeout(resolve, timeoutMs)),
+    ]);
+  }
+
+  return job;
+}
+
+

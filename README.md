@@ -23,6 +23,20 @@ The bridge never invokes `--disable-slash-commands`. It uses AGY's required
 Per-job AGY logs are stored under `logs/` so a bridge response can be matched to
 the original backend error without scanning unrelated global CLI logs.
 
+> **Status: Feature Freeze (v1.5.1 Final GA)**
+> The Antigravity Subagent MCP & Dashboard architecture is now fully feature-complete and frozen.
+> All production pipelines (Batch Delegation, God's-eye Dashboard, DAG Topology, Dynamic Transcript LRU, Fine-grained SSE, Interactive Stream Transport, and HITL Lifecycle) are verified end-to-end against live AGY hardware and continuous integration.
+
+Version 1.5.1 changes (Feature Freeze Final Release):
+
+- **Graceful Stream Session Termination (`finish_gemini_task`)**:
+  - Added official MCP tool `finish_gemini_task(job_id)` and Dashboard endpoint `POST /api/jobs/:id/finish`, allowing clients and operators to gracefully terminate long-running stream sessions by safely invoking `stdin.end()` and awaiting exit completion.
+  - Enhanced `interact_gemini_task` with `end_session: boolean (default: false)` to send a final instruction and immediately close the input stream in a single step.
+- **Stream Exit State Machine Decoupling**:
+  - Decoupled process close handling in stream mode from single-turn `parseAgyJson`. Directly leverages stream-parsed `lastTurnResult`, preventing NDJSON `{event: "result"}` wrappers from corrupting task status and ensuring clean convergence to `state: "success"`.
+- **Production MCP Real-AGY E2E Verification**:
+  - `test/hitl-real-agy.e2e.test.mjs` rewritten to connect directly as a live MCP client through `src/server.mjs`, validating the complete lifecycle (`start_gemini_task` -> `interact_gemini_task` -> `finish_gemini_task`) with actual AGY binaries and exit code 0.
+
 Version 1.5.0 changes:
 
 - **Interactive Stream Transport & Native Multi-Turn HITL Closure**:

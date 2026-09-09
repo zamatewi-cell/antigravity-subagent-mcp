@@ -1,13 +1,15 @@
-﻿import assert from "node:assert/strict";
+import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import http from "node:http";
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { Client } from "@modelcontextprotocol/client";
+import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 
-console.log("=== 开始执行 真实 AGY 端到端多轮交互 E2E 测试 (test/hitl-real-agy.e2e.test.mjs) ===");
+console.log("=== 开始执行 生产级 MCP 真实 AGY 端到端 E2E 完整生命周期测试 ===");
 
-// 1. 探测本地 AGY CLI 可执行文件路径
+// 1. 探测本地 AGY CLI
 function detectAgyCli() {
   if (process.env.AGY_CLI_PATH && fs.existsSync(process.env.AGY_CLI_PATH)) {
     return process.env.AGY_CLI_PATH;
@@ -20,8 +22,6 @@ function detectAgyCli() {
 }
 
 const agyPath = detectAgyCli();
-
-// 2. 探查当前环境是否有可用的 agy 二进制
 const isAgyAvailable = await new Promise((resolve) => {
   try {
     const probe = spawn(agyPath, ["--version"], { windowsHide: true, shell: false });
@@ -37,151 +37,127 @@ if (!isAgyAvailable) {
   process.exit(0);
 }
 
-console.log(`✔ 已检测到真实 AGY CLI：${agyPath}，开始进行端到端多轮交互验证...`);
+console.log(`✔ 已检测到真实 AGY CLI：${agyPath}`);
 
-// 3. 严格使用临时沙箱隔离，杜绝污染生产目录
-const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-real-e2e-"));
-process.env.ANTIGRAVITY_MCP_DATA_DIR = path.join(tempDir, "data", "jobs");
-process.env.ANTIGRAVITY_MCP_LOG_DIR = path.join(tempDir, "logs");
-fs.mkdirSync(process.env.ANTIGRAVITY_MCP_DATA_DIR, { recursive: true });
-fs.mkdirSync(process.env.ANTIGRAVITY_MCP_LOG_DIR, { recursive: true });
+const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-prod-e2e-"));
+const dataDir = path.join(tempDir, "data", "jobs");
+const logDir = path.join(tempDir, "logs");
+fs.mkdirSync(dataDir, { recursive: true });
+fs.mkdirSync(logDir, { recursive: true });
 
-const { StreamLineParser, encodeStreamUserMessage } = await import("../src/stream-transport.mjs");
-const { sendInputToJob } = await import("../src/process-control.mjs");
-const { startDashboardServer } = await import("../src/dashboard.mjs");
-const { JOBS_DIR } = await import("../src/storage.mjs");
+// 2. 启动生产 MCP 进程并连接 Stdio 传输通道
+const transport = new StdioClientTransport({
+  command: process.execPath,
+  args: [path.join(rootDir, "src/server.mjs")],
+  env: {
+    ...process.env,
+    AGY_CLI_PATH: agyPath,
+    ANTIGRAVITY_MCP_DATA_DIR: dataDir,
+    ANTIGRAVITY_MCP_LOG_DIR: logDir,
+  },
+  stderr: "pipe",
+});
 
-assert(JOBS_DIR.startsWith(tempDir), "测试数据目录必须被严格重定向到临时沙箱！");
+const client = new Client({ name: "prod-e2e-client", version: "1.5.1" });
 
-function httpPost(url, bodyObj) {
-  return new Promise((resolve, reject) => {
-    const u = new URL(url);
-    const bodyStr = typeof bodyObj === "string" ? bodyObj : JSON.stringify(bodyObj);
-    const req = http.request(
-      {
-        hostname: u.hostname,
-        port: u.port,
-        path: u.pathname + u.search,
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Content-Length": Buffer.byteLength(bodyStr),
-        },
-      },
-      (res) => {
-        let respBody = "";
-        res.on("data", (chunk) => { respBody += chunk.toString("utf8"); });
-        res.on("end", () => resolve({ statusCode: res.statusCode, body: respBody }));
-      }
-    );
-    req.on("error", reject);
-    req.write(bodyStr);
-    req.end();
-  });
-}
+const call = async (name, args) => {
+  const response = await client.callTool({ name, arguments: args }, { timeout: 45_000 });
+  return { isError: response.isError, ...JSON.parse(response.content[0].text) };
+};
 
 const timeoutTimer = setTimeout(() => {
-  console.error("❌ 真实 AGY 端到端交互测试超时（60s）！");
+  console.error("❌ 生产级 MCP 端到端交互测试全局超时（90s）！");
   process.exit(1);
-}, 60000);
+}, 90000);
 
 try {
-  // 启动真实子进程，进入 stream-json 交互管道
-  const child = spawn(agyPath, [
-    "--input-format", "stream-json",
-    "--output-format", "stream-json",
-    "--dangerously-skip-permissions",
-  ], {
-    stdio: ["pipe", "pipe", "pipe"],
-    env: process.env,
-    windowsHide: true,
+  await client.connect(transport);
+  console.log("✔ 已成功连接生产 MCP 服务 (stdio)");
+
+  // 1. 通过生产 MCP 工具 start_gemini_task 启动流式交互任务
+  console.log(">>> [E2E Step 1] 调用 start_gemini_task(session_mode: 'stream')...");
+  const started = await call("start_gemini_task", {
+    prompt: "请回复一条简短问候，回复中必须严格包含单词 PROD_E2E_TURN_1_OK。",
+    session_mode: "stream",
+    working_directory: tempDir,
   });
 
-  const job = {
-    jobId: "real-agy-job-e2e",
-    state: "running",
-    sessionMode: "stream",
-    numTurns: 0,
-    conversationId: null,
-    child,
-    turn1Result: null,
-    turn2Result: null,
-  };
+  const jobId = started.job_id;
+  assert.ok(jobId, "start_gemini_task 必须返回 job_id");
+  assert.equal(started.state, "running");
+  assert.equal(started.session_mode, "stream");
+  console.log(`✔ 任务成功启动，Job ID: ${jobId}`);
 
-  const memoryJobs = new Map();
-  memoryJobs.set(job.jobId, job);
-
-  // 启动看板服务供 HTTP 注入测试
-  const dashboard = await startDashboardServer({
-    memoryJobs,
-    port: 3995,
-    autoOpen: false,
-  });
-
-  const streamParser = new StreamLineParser(async (evt) => {
-    if (evt.event === "init") {
-      job.conversationId = evt.conversation_id;
-      console.log(`[E2E 握手成功] 收到 init 事件，提取 conversation_id: ${job.conversationId}`);
-    } else if (evt.event === "result") {
-      const turnNum = evt.result?.num_turns || (job.numTurns + 1);
-      job.numTurns = turnNum;
-      console.log(`[E2E 轮次完成] 收到 Turn ${turnNum} 结果:`, evt.result?.response ? evt.result.response.slice(0, 80).replace(/\r?\n/g, ' ') : "");
-      
-      if (turnNum === 1) {
-        job.turn1Result = evt.result;
-        console.log(">>> [E2E] 第一轮成功收到！正在通过 Dashboard POST /api/jobs/:id/interact 注入第二轮指令...");
-        
-        // 通过真实 Dashboard HTTP 接口注入第二轮交互
-        const interactResp = await httpPost(`${dashboard.url}/api/jobs/${job.jobId}/interact`, {
-          input: "收到第一轮了！现在请回复第二轮指令，回复中必须严格包含单词 REAL_STREAM_TURN_2_OK。",
-        });
-        assert.equal(interactResp.statusCode, 200, "Dashboard /interact 接口必须响应 200");
-        const interactData = JSON.parse(interactResp.body);
-        assert.equal(interactData.success, true);
-        assert.equal(interactData.sessionMode, "stream");
-        assert.equal(interactData.experimental, false);
-        console.log(">>> [E2E] 第二轮指令已通过 Dashboard 安全管道注入子进程 stdin！");
-      } else if (turnNum === 2) {
-        job.turn2Result = evt.result;
-        console.log(">>> [E2E] 第二轮成功收到！正在关闭 stdin 触发子进程优雅退出...");
-        child.stdin.end();
-      }
+  // 2. 轮询 get_gemini_task 等待第 1 轮完成
+  console.log(">>> [E2E Step 2] 等待第 1 轮回复与 conversation_id 捕获...");
+  let currentJob = null;
+  const deadline1 = Date.now() + 40000;
+  while (Date.now() < deadline1) {
+    currentJob = await call("get_gemini_task", { job_id: jobId });
+    if (currentJob.num_turns >= 1 && currentJob.result?.response) {
+      break;
     }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+
+  assert.ok(currentJob, "get_gemini_task 必须返回有效任务对象");
+  assert.equal(currentJob.state, "running", "第一轮完成后任务必须保持 running 态以支持多轮交互");
+  assert.equal(currentJob.num_turns, 1, "第一轮计数必须为 1");
+  assert.ok(currentJob.conversation_id, "必须成功捕获原生 conversation_id");
+  assert(
+    currentJob.result?.response?.includes("PROD_E2E_TURN_1_OK"),
+    `第一轮回复必须包含目标标记，实际输出: ${currentJob.result?.response}`
+  );
+  console.log(`✔ 第 1 轮成功捕获！conversation_id: ${currentJob.conversation_id}`);
+  console.log(`  -> 回复预览: ${currentJob.result.response.slice(0, 60).replace(/\r?\n/g, " ")}`);
+
+  // 3. 通过生产 MCP 工具 interact_gemini_task 注入第 2 轮指令
+  console.log(">>> [E2E Step 3] 调用 interact_gemini_task 注入第 2 轮输入...");
+  const interacted = await call("interact_gemini_task", {
+    job_id: jobId,
+    input: "收到第一轮了！现在请回复第二轮指令，回复中必须严格包含单词 PROD_E2E_TURN_2_OK。",
   });
+  assert.equal(interacted.status, "SUCCESS");
+  assert.equal(interacted.session_mode, "stream");
+  console.log("✔ 第 2 轮输入成功送入子进程 stdin");
 
-  child.stdout.on("data", (chunk) => streamParser.feed(chunk));
-  child.stderr.on("data", (chunk) => {
-    // 捕获 stderr 用于排错
-    const errText = chunk.toString("utf8").trim();
-    if (errText) console.log(`[AGY STDERR]: ${errText}`);
-  });
+  // 4. 轮询 get_gemini_task 等待第 2 轮完成
+  console.log(">>> [E2E Step 4] 等待第 2 轮回复...");
+  const deadline2 = Date.now() + 40000;
+  while (Date.now() < deadline2) {
+    currentJob = await call("get_gemini_task", { job_id: jobId });
+    if (currentJob.num_turns >= 2 && currentJob.result?.response?.includes("PROD_E2E_TURN_2_OK")) {
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
 
-  // 1. 发送第一轮 Prompt 启动多轮会话
-  const turn1Msg = encodeStreamUserMessage("请回复一条简短问候，回复中必须严格包含单词 REAL_STREAM_TURN_1_OK。");
-  console.log(">>> [E2E] 正在下发第一轮 Prompt 启动交互流...");
-  child.stdin.write(turn1Msg);
+  assert.equal(currentJob.state, "running", "第二轮完成后任务仍处于等待收敛状态");
+  assert.equal(currentJob.num_turns, 2, "第二轮计数必须为 2");
+  assert(
+    currentJob.result?.response?.includes("PROD_E2E_TURN_2_OK"),
+    `第二轮回复必须包含目标标记，实际输出: ${currentJob.result?.response}`
+  );
+  console.log("✔ 第 2 轮成功捕获！");
+  console.log(`  -> 回复预览: ${currentJob.result.response.slice(0, 60).replace(/\r?\n/g, " ")}`);
 
-  // 等待子进程优雅退出
-  const exitCode = await new Promise((resolve) => {
-    child.once("close", (code) => resolve(code));
-  });
+  // 5. 调用生产 MCP 工具 finish_gemini_task 优雅结束会话
+  console.log(">>> [E2E Step 5] 调用 finish_gemini_task 触发正常关闭与 success 收敛...");
+  const finished = await call("finish_gemini_task", { job_id: jobId });
 
-  streamParser.flush();
-  await dashboard.close();
+  // 6. 终极业务断言：state 必须为 success，result.status 为 SUCCESS，num_turns 为 2
+  assert.equal(finished.state, "success", "任务状态必须成功收敛为 success 终态");
+  assert.equal(finished.result?.status, "SUCCESS", "结果状态必须为 SUCCESS");
+  assert.equal(finished.num_turns, 2, "总交互轮数必须精确为 2");
+  assert.ok(finished.completed_at, "必须记录完成时间 completed_at");
+  console.log("✔ 任务优雅关闭并成功收敛进入 success 终态！");
 
-  console.log(`✔ 子进程优雅退出，Exit Code: ${exitCode}`);
-  assert.equal(exitCode, 0, "AGY 进程在多轮交互后必须以 0 优雅退出");
-  assert.ok(job.conversationId, "必须捕获到真实 conversation_id");
-  assert.equal(job.numTurns, 2, "多轮交互总轮数必须严格为 2");
-  
-  // 验证两轮模型输出中的核心标记
-  const text1 = job.turn1Result?.response || "";
-  const text2 = job.turn2Result?.response || "";
-  assert(text1.includes("REAL_STREAM_TURN_1_OK"), `第一轮输出必须包含目标标记，实际输出: ${text1}`);
-  assert(text2.includes("REAL_STREAM_TURN_2_OK"), `第二轮输出必须包含目标标记，实际输出: ${text2}`);
-
-  console.log("\n[All Assertions Passed] 真实 AGY 端到端 E2E 双轮交互闭环 100% 成功！\n");
+  console.log("\n[All Assertions Passed] 生产级 MCP 真实 AGY 端到端 E2E 完整生命周期闭环 100% 成功！\n");
 } finally {
   clearTimeout(timeoutTimer);
-  fs.rmSync(tempDir, { recursive: true, force: true });
+  try { await client.close(); } catch {}
+  try {
+    fs.rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  } catch {}
 }

@@ -7,14 +7,14 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import * as z from "zod/v4";
 import { enrichAgyResult, sanitizeDiagnostics } from "./diagnostics.mjs";
-import { stopProcessTree, stopJob, cancelJob, sendInputToJob, isRetryablePreflightFailure } from "./process-control.mjs";
+import { stopProcessTree, stopJob, cancelJob, sendInputToJob, finishJob, isRetryablePreflightFailure } from "./process-control.mjs";
 import { StreamLineParser, encodeStreamUserMessage } from "./stream-transport.mjs";
 import { getTaskProgress } from "./progress.mjs";
 import { persistJob, restorePersistedJobs } from "./storage.mjs";
 import { startDashboardServer, openInBrowser } from "./dashboard.mjs";
 import { withDirectoryLock } from "./directory-lock.mjs";
 
-const SERVER_VERSION = "1.5.0";
+const SERVER_VERSION = "1.5.1";
 const DEFAULT_MODEL = process.env.ANTIGRAVITY_DEFAULT_MODEL || "gemini-3.8-flash-high";
 const DEFAULT_PERMISSION_MODE = process.env.ANTIGRAVITY_PERMISSION_MODE || "auto-approve";
 const DEFAULT_TIMEOUT_SECONDS = 300;
@@ -290,10 +290,9 @@ function launchAgy(input, jobId = randomUUID()) {
       if (job.timeoutHandle) clearTimeout(job.timeoutHandle);
       if (job.stopPromise) await job.stopPromise;
       if (streamParser) streamParser.flush();
-      let parsed = parseAgyJson(job.stdout);
-      if (!parsed && isStream && job.result) {
-        parsed = job.result;
-      }
+      const parsed = isStream
+        ? (job.lastTurnResult || job.result)
+        : parseAgyJson(job.stdout);
       let diagnosticLog = "";
       try {
         diagnosticLog = fs.readFileSync(job.invocation.log_file, "utf8");
@@ -605,18 +604,24 @@ server.registerTool(
   "interact_gemini_task",
   {
     title: "与运行中的 Gemini 子代理交互 (HITL)",
-    description: "向正在运行的长会话子代理（尤其处于 stream 模式的任务）注入交互式指令或人工输入。",
+    description: "向正在运行的长会话子代理（尤其处于 stream 模式的任务）注入交互式指令或人工输入，支持可选在完成当轮后优雅结束会话。",
     inputSchema: z.object({
       job_id: z.string().uuid().describe("目标运行中任务的 job_id"),
       input: z.string().min(1).describe("需要向子代理输入的指令或交互内容"),
+      end_session: z.boolean().default(false).describe("是否在本次交互发送后自动关闭输入流，触发任务在当前轮次完成后收敛为 success 终态"),
     }),
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   },
-  async ({ job_id, input }) => {
+  async ({ job_id, input, end_session }) => {
     const job = jobs.get(job_id);
     if (!job) return toolResponse({ status: "ERROR", error: `未找到任务：${job_id}` }, true);
     if (job.state !== "running") {
       return toolResponse({ status: "ERROR", error: `任务当前状态为 ${job.state}，无法接收交互输入` }, true);
+    }
+    if (end_session) {
+      job.onTurnComplete = () => {
+        try { job.child?.stdin?.end(); } catch {}
+      };
     }
     try {
       const sendResult = await sendInputToJob(job, input);
@@ -626,7 +631,36 @@ server.registerTool(
         bytes_written: sendResult.bytesWritten,
         session_mode: sendResult.sessionMode,
         num_turns: job.numTurns || 0,
+        end_session: Boolean(end_session),
       });
+    } catch (err) {
+      return toolResponse({ status: "ERROR", error: err.message }, true);
+    }
+  },
+);
+
+server.registerTool(
+  "finish_gemini_task",
+  {
+    title: "优雅结束 Gemini 子代理长会话 (HITL)",
+    description: "主动结束处于 stream 模式的运行中任务，关闭 stdin 管道并等待任务优雅收敛进入 success 终态。",
+    inputSchema: z.object({
+      job_id: z.string().uuid().describe("目标 stream 运行中任务的 job_id"),
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+  },
+  async ({ job_id }) => {
+    const job = jobs.get(job_id);
+    if (!job) return toolResponse({ status: "ERROR", error: `未找到任务：${job_id}` }, true);
+    if (job.sessionMode !== "stream") {
+      return toolResponse({ status: "ERROR", error: `任务 ${job_id} 为 ${job.sessionMode || "print"} 模式，仅 stream 会话任务支持 finish` }, true);
+    }
+    if (job.state !== "running") {
+      return toolResponse(publicJob(job), job.state === "error");
+    }
+    try {
+      await finishJob(job);
+      return toolResponse(publicJob(job), job.state === "error");
     } catch (err) {
       return toolResponse({ status: "ERROR", error: err.message }, true);
     }

@@ -1,8 +1,9 @@
-# 1.5.0 验证记录与工程交付报告
+# 1.5.1 验证记录与收官交付报告 (Feature Freeze)
 
 验证日期：2026-09-09  
-服务版本：`v1.5.0`  
-默认模型：`gemini-3.8-flash-high`
+服务版本：`v1.5.1` (收官终态冻结版本)  
+默认模型：`gemini-3.8-flash-high`  
+项目状态：**Feature Freeze (全面功能冻结，停止边际特性蔓延)**
 
 ---
 
@@ -23,6 +24,7 @@
 | **v1.3.3** | **1.3.x 终极封板与架构解耦**：<br>1. 两层解析架构彻底根治子代理状态冻结；<br>2. 抽离独立目录锁模块 `src/directory-lock.mjs`；<br>3. 实现真 LRU 机制与 `diskJobsCache` 500 条上限保护；<br>4. 配置 GitHub Actions CI 自动化流水线 (`.github/workflows/ci.yml`)。 | `test/counterexamples.test.mjs` (Test 16~18), `npm run test:offline` (全部 6 套离线套件 100% 通过) |
 | **v1.4.0** | **企业级四大核心特性飞跃**：<br>1. **历史任务分页与过滤 (R1)**：`GET /api/jobs` 支持 `page` / `limit` / `state` / `search`，标准化分页响应与无参向后兼容；<br>2. **SSE 差异增量流与 Delta Patching (R2)**：首发 snapshot + 变动事件 (`job_created`/`job_updated`/`job_removed`) + `:keep-alive` 保活，前端内存字典局部打补丁消除全量重刷；<br>3. **原生 SVG Agent DAG 拓扑 (R3)**：有向拓扑元数据注入 (`parentId`/`depth`/`childrenIds`/`nodeType`)，纯原生 SVG 贝塞尔连线与 CSS 呼吸流光；<br>4. **Human-in-the-loop 软介入 (R4)**：子进程 `stdio` 保留，安全 `sendInputToJob` 与 `POST /api/jobs/:id/interact` 接口及前端控制台。 | `test/pagination.test.mjs` (12/12 PASS), `test/sse-delta.test.mjs` (6/6 PASS), `test/dag-topology.test.mjs` (4/4 PASS), `test/hitl.test.mjs` (7/7 PASS), `npm run test:offline` (全部 10 套离线套件 100% 通过) |
 | **v1.5.0** | **原生双向交互流传输管道与真实 AGY E2E 闭环 (HITL GA)**：<br>1. **双轨执行架构 (Dual-Track)**：常规单次任务保持 `--print` 稳定委托，交互任务启用 `--input-format stream-json --output-format stream-json`；<br>2. **官方 NDJSON 协议规范接入**：stdout 捕获 `event: init` 提取真实 `conversation_id`，行缓冲流式解析 `step_update` 与 `result`；<br>3. **同进程同会话多轮驱动**：首轮完成后进程保持存活，通过 stdin/Dashboard `/interact` 注入第二轮并递增 `numTurns`；<br>4. **真实 AGY 端到端闭环**：本地真实 `agy.exe` 跑通“第 1 轮 prompt → Web 交互介入 → 同会话第 2 轮完成 → 优雅退出 (Exit 0)”。 | `test/hitl-stream-transport.test.mjs` (5/5 PASS), `test/hitl-real-agy.e2e.test.mjs` (真实 AGY E2E 闭环 PASS), `npm run test:offline` (全部 11 套离线套件 100% 通过) |
+| **v1.5.1** | **生产优雅结束入口补全与 Stream 状态机解耦 (Feature Freeze 收官)**：<br>1. **公开生产结束工具 `finish_gemini_task`**：开放 MCP 工具与 Dashboard `POST /api/jobs/:id/finish`，安全 `stdin.end()` 优雅终结流式会话；<br>2. **`interact_gemini_task` 终轮合并支持**：支持 `end_session: true` 单步完成最后提示词并关闭管道；<br>3. **Stream close handler 解耦**：流模式下退出不再走针对单轮的 `parseAgyJson`（避免多行 NDJSON 误判），直接从 `lastTurnResult` 收敛 `success`；<br>4. **完整穿透生产链路真实 E2E**：真实 MCP Client 调用生产工具链验证多轮交互与退出码 0，全面确立 **Feature Freeze 冻结守则**。 | `test/hitl-stream-transport.test.mjs` (8/8 PASS), `test/hitl-real-agy.e2e.test.mjs` (真实生产 MCP 客户端穿透 100% PASS), `npm run test:offline` (全部 11 套离线套件 100% 通过) |
 
 ---
 
@@ -106,9 +108,19 @@
 - [x] **Test 8**: 验证 64 KiB 请求体大小上限防御（超出返回 HTTP 413 Payload Too Large）。
 - [x] **Test 9**: 验证底层 write 失败时的 stream write callback confirmation 与真实 reject 机制，杜绝假成功。
 
+### 8. 交互式流传输协议与会话优雅结束单测 (`node test/hitl-stream-transport.test.mjs`)
+- [x] **Test 1**: 验证 `encodeStreamUserMessage` 协议封包与官方 Headless NDJSON 规范严格对齐。
+- [x] **Test 2**: 验证 `StreamLineParser` 针对 TCP 管道粘包、半包与断行恢复能力。
+- [x] **Test 3**: 验证 `sendInputToJob` 在 stream 模式下自动透明封包 NDJSON 注入 stdin。
+- [x] **Test 4**: 验证流式事件驱动的状态流转、`conversationId` 捕获与多轮交互计数 `numTurns`。
+- [x] **Test 5**: 验证 Dashboard 在 stream 模式下成功触发交互并返回正式特性标记。
+- [x] **Test 6**: 验证 `finishJob` 优雅结束 stream 会话并触发输入管道关闭。
+- [x] **Test 7**: 验证 Web Dashboard `POST /api/jobs/:id/finish` 接口与参数防御。
+- [x] **Test 8**: 验证 Stream 模式下 close handler 彻底解耦 NDJSON 外层包装，确立 `success` 终态稳定判定。
+
 ---
 
-## 三、1.4.0 核心验收标准对齐与证据链 (Acceptance Criteria Evidence)
+## 三、1.4.0 & 1.5.0 核心验收标准对齐与证据链 (Acceptance Criteria Evidence)
 
 ### 验收标准 1：分页过滤与边界条件测试通过事实 (AC1)
 - **断言事实**: 运行 `node test/pagination.test.mjs`，12/12 测试用例 100% PASS。
@@ -143,7 +155,7 @@
 | **标准 MCP 协议任务启动** | SUCCESS | 调用 `start_gemini_task` 生成全局 Job ID，后台拉起独立无头 `agy.exe` 进程。 |
 | **Teamwork 级联多代理启动** | SUCCESS | 成功拉起 Project Sentinel、Top Orchestrator 与专项 Worker，并在 transcript 中核对到 `invoke_subagent`。 |
 | **Web 看板微观上帝视角呈现** | SUCCESS | 使用 Playwright 自动化渲染 `http://localhost:3721`，主编排器卡片、子代理卡片矩阵与 Step 1~72+ 全量活动流水毫秒级实时联动。 |
-| **真实 AGY 交互流传输 E2E 闭环 (v1.5.0)** | SUCCESS | 本地 `test/hitl-real-agy.e2e.test.mjs` 拉起真实 `D:\Antigravity\agy\bin\agy.exe`，跑通“第 1 轮 Prompt → 捕获 init conversation_id (`5a87738a-...`) → Web Dashboard `/interact` 注入第 2 轮 → 同会话输出第 2 轮结果 → `stdin.end()` 优雅退出 (Exit 0)”。 |
+| **生产真实 MCP Client 交互流与优雅退出闭环 (v1.5.1)** | SUCCESS | 本地 `test/hitl-real-agy.e2e.test.mjs` 通过真实 MCP 客户端连接 `src/server.mjs`，执行 `start_gemini_task` -> `get_gemini_task` -> `interact_gemini_task` -> `finish_gemini_task`。断言 `state === "success"`、`result.status === "SUCCESS"`、`num_turns === 2`、`exitCode === 0`，全流程实测 100% 绿色通过。 |
 
 ---
 
@@ -152,3 +164,16 @@
 1. **文件访问控制**：工作目录上下文在提示词与指令级别生效，不等于 Linux 命名空间或容器级别的硬隔离。
 2. **进程树清理**：本地进程树清理在 Windows 上通过 `taskkill /PID <pid> /T /F`、在 Unix 上通过进程组信号强杀，确保本地孤儿进程完全清理，但不跨越物理宿主机。
 3. **并发安全**：针对同一目录的任务强制排队互斥执行；不同目录任务允许并发推进。
+
+---
+
+## 六、Feature Freeze 功能冻结守则 (Feature Freeze Protocol)
+
+> **声明：本项目从 v1.5.1 起正式进入 Feature Freeze（功能冻结）阶段。**
+
+1. **停止扩展范围**：不再引入任何非必要的边缘特性、非关键协议分支或装饰性功能。
+2. **变更准入底线**：后续仅允许在发生以下情况时进行改动：
+   - 发现能够导致宿主崩溃、内存泄露或安全越权的真 Bug（P1/P2）；
+   - Google Antigravity 官方 CLI 发生物理性破坏破坏性变更（Breaking Changes）；
+   - 能够证明能直接令 Codex 编码吞吐量或任务执行成功率产生质的飞跃的关键优化。
+3. **交付基准**：当前架构已具备完整的单次委托、多轮交互、双向流传输、细粒度状态穿透与实时可视化能力，已作为高可靠的个人与团队 Agent 基础设施正式封板。
